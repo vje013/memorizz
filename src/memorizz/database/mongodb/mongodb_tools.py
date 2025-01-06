@@ -3,7 +3,6 @@ import getpass
 import inspect
 from functools import wraps
 from typing import get_type_hints, List, Dict, Any, Optional
-import openai
 import pymongo
 from pymongo.collection import Collection
 from pymongo.operations import SearchIndexModel
@@ -18,22 +17,17 @@ class MongoDBToolsConfig:
     mongo_uri: Optional[str] = None
     db_name: str = 'function_calling_db'
     collection_name: str = 'tools'
-    embedding_model: str = "text-embedding-3-small",
-    embeding_dimensions_size: int = 256,
     vector_search_candidates: int = 150,
     vector_index_name: str = "vector_index"
+    get_embedding: callable = None
 
-def get_embedding(text: str, model: str = "text-embedding-3-small", dimensions: int = 256) -> List[float]:
-    text = text.replace("\n", " ")
-    try:
-        return openai.OpenAI().embeddings.create(input=[text], model=model, dimensions=dimensions).data[0].embedding
-    except Exception as e:
-        logger.error(f"Error generating embedding: {str(e)}")
-        raise
 
 class MongoDBTools:
     def __init__(self, config: MongoDBToolsConfig = MongoDBToolsConfig()):
         self.config = config
+        if not self.config.get_embedding:
+            #throw error
+            raise ValueError("get_embedding function is not provided")
         if self.config.mongo_uri is None:
             self.config.mongo_uri = os.getenv('MONGO_URI') or getpass.getpass("Enter MongoDB URI: ")
         
@@ -119,7 +113,7 @@ class MongoDBTools:
             tool_def["parameters"]["additionalProperties"] = False
 
             try:
-                vector = get_embedding(tool_def["description"], self.config.embedding_model, self.config.embeding_dimensions_size)
+                vector = self.config.get_embedding(tool_def["description"])
                 tool_doc = {
                     **tool_def,
                     "embedding": vector
@@ -138,7 +132,7 @@ class MongoDBTools:
             collection = self.tools_collection
 
         try:
-            query_embedding = get_embedding(user_query, self.config.embedding_model, self.config.embeding_dimensions_size)
+            query_embedding = self.config.get_embedding(user_query)
         except Exception as e:
             logger.error(f"Error generating embedding for query: {str(e)}")
             raise
@@ -261,7 +255,7 @@ class MongoDBTools:
                         "dynamic": True,
                         "fields": {
                             "embedding": {
-                                "dimensions": self.config.embeding_dimensions_size,
+                                "dimensions": len(self.config.get_embedding("0")),
                                 "similarity": "cosine",
                                 "type": "knnVector",
                             }
@@ -286,7 +280,7 @@ class MongoDBTools:
         except Exception as e:
             logger.warning(f"Note on vector search index: {str(e)}")
             
-__all__ = ['MongoDBTools', 'MongoDBToolsConfig', 'get_embedding']
+__all__ = ['MongoDBTools', 'MongoDBToolsConfig']
 
 # You can create a function to get the mongodb_toolbox decorator:
 def get_mongodb_toolbox(config: MongoDBToolsConfig = MongoDBToolsConfig()):
