@@ -19,6 +19,8 @@ classifiers = [
 dependencies = [
     "openai",
     "pymongo",
+    "langchain_ollama",
+    "ollama"
 ]
 [tool.setuptools]
 package-dir = {"" = "src"}
