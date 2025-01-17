@@ -106,15 +106,17 @@ os.environ["MONGO_URI"] = MONGO_URI
 You can create a MongoDBTools instance in two ways:
 
 ```python
-# 1. Initialize the MongoDB configuration and create a MongoDB tools instance
+# 1. Get the desired embedding from memorizz.embeddings
+#from memorizz.embeddings.ollama import get_embedding 
+from memorizz.embeddings.openai import get_embedding
+# 2. Initialize the MongoDB configuration and create a MongoDB tools instance
 config = MongoDBToolsConfig(
     mongo_uri=MONGO_URI,  # MongoDB connection string
     db_name="function_calling_db",  # Name of the database to use
     collection_name="tools",  # Name of the collection to store tools
-    embedding_model="text-embedding-3-small",  # OpenAI model for generating embeddings
-    embeding_dimensions_size=256,  # Dimension size for the embedding vectors
     vector_search_candidates=150,  # Number of candidates to consider in vector search
-    vector_index_name="vector_index"  # Name of the vector index in MongoDB
+    vector_index_name="vector_index",  # Name of the vector index in MongoDB
+    get_embedding=get_embedding
 )
 
 # 2. Create an instance of MongoDBTools with the configured settings
@@ -283,7 +285,7 @@ Make sure you have set up your MongoDB instance and have the necessary permissio
 - [x] Implement error handling and logging
 - [x] Create PyPI package
 - [x] Restructure package for extensibility to other databases
-- [ ] Add support for multiple embedding models to make MongoDBToolsConfig embedding model agnostic
+- [x] Add support for multiple embedding models to make MongoDBToolsConfig embedding model agnostic
 - [ ] Implement MemScore logic for improved tool ranking and memory component retrival
 - [ ] Add async support for improved performance
 - [ ] Implement caching mechanism for embeddings and search results
