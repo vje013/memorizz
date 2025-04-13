@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.18"
-authors = [
-  { name="Richmond Alake", email="richmond.alake@gmail.com" },
-]
+version = "0.0.19"
 description = "A memory management library for Python"
 readme = "README.md"
 requires-python = ">=3.7"
+license = "MIT"
+authors = [
+    { name = "Richmond Alake", email = "richmond.alake@gmail.com" }
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -22,8 +23,6 @@ dependencies = [
     "langchain_ollama",
     "ollama"
 ]
-[tool.setuptools]
-package-dir = {"" = "src"}
 
 [project.urls]
 "Homepage" = "https://github.com/RichmondAlake/memorizz"

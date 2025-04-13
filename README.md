@@ -88,7 +88,7 @@ Now that you have your MongoDB URI, you can use it to connect to your cluster in
 First, import the necessary components and set up your environment:
 
 ```python
-from memorizz.database.mongodb import MongoDBToolsConfig, MongoDBTools
+from memorizz.memory_provider.mongodb import MongoDBToolsConfig, MongoDBTools
 import os
 import getpass
 
@@ -120,15 +120,15 @@ config = MongoDBToolsConfig(
 )
 
 # 2. Create an instance of MongoDBTools with the configured settings
-mongodb_tools = MongoDBTools(config)
+toolbox = MongoDBTools(config)
 
 # 3. Create a decorator function for registering tools
-mongodb_toolbox = mongodb_tools.mongodb_toolbox
+toolbox_decorator = toolbox.mongodb_toolbox
 ```
 
 #### Registering Functions as Tools
 
-Use the `@mongodb_toolbox` decorator to register functions as tools. It's crucial to include a detailed Google-style docstring for each function, as this docstring is what gets embedded and utilized for semantic retrieval.
+Use the `@toolbox_decorator` decorator to register functions as tools. It's crucial to include a detailed Google-style docstring for each function, as this docstring is what gets embedded and utilized for semantic retrieval.
 
 The docstring should include:
 
@@ -142,9 +142,9 @@ The docstring should include:
 import random
 from datetime import datetime
 
-# 4. Define and register tool functions using the mongodb_toolbox decorator
+# 4. Define and register tool functions using the toolbox_decorator decorator
 # These functions will be stored in the MongoDB database and can be retrieved for function calling
-@mongodb_toolbox()
+@toolbox_decorator()
 def shout(statement: str) -> str:
   """
   Convert a statement to uppercase letters to emulate shouting. Use this when a user wants to emphasize something strongly or when they explicitly ask to 'shout' something..
@@ -152,7 +152,7 @@ def shout(statement: str) -> str:
   """
   return statement.upper()
 
-@mongodb_toolbox()
+@toolbox_decorator()
 def get_weather(location: str, unit: str = "celsius") -> str:
     """
     Get the current weather for a specified location.
@@ -171,7 +171,7 @@ def get_weather(location: str, unit: str = "celsius") -> str:
     condition = random.choice(conditions)
     return f"The weather in {location} is currently {condition} with a temperature of {temperature}°{'C' if unit.lower() == 'celsius' else 'F'}."
 
-@mongodb_toolbox()
+@toolbox_decorator()
 def get_stock_price(symbol: str) -> str:
     """
     Get the current stock price for a given stock symbol.
@@ -183,7 +183,7 @@ def get_stock_price(symbol: str) -> str:
     price = round(random.uniform(10, 1000), 2)
     return f"The current stock price of {symbol} is ${price}."
 
-@mongodb_toolbox()
+@toolbox_decorator()
 def get_current_time(timezone: str = "UTC") -> str:
     """
     Get the current time for a specified timezone.
@@ -206,7 +206,7 @@ You can retrieve relevant tools based on a user query:
 user_query = "Hi, can you shout the statement: We are there"
 
 # 6. Populate tools based on the user query
-tools = mongodb_tools.populate_tools(
+tools = toolbox.populate_tools(
     user_query,  # The query string to search for relevant tools
     num_tools=2  # The maximum number of tools to return from the search
     )

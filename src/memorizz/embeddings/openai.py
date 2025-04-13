@@ -14,3 +14,11 @@ def get_embedding(text: str, model: str = "text-embedding-3-small", dimensions: 
     except Exception as e:
         logger.error(f"Error generating embedding: {str(e)}")
         raise
+
+def get_embedding_dimensions(model: str = "text-embedding-3-small") -> int:
+    if model == "text-embedding-3-small":
+        return 256
+    elif model == "text-embedding-3-large":
+        return 1024
+    else:
+        raise ValueError(f"Unsupported model: {model}")
