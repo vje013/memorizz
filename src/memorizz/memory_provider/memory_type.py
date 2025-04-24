@@ -8,4 +8,5 @@ class MemoryType(Enum):
     LONG_TERM_MEMORY = "long_term_memory"
     CONVERSATION_MEMORY = "conversation_memory"
     WORKFLOW_MEMORY = "workflow_memory"
+    MEMAGENT = "agents"
 

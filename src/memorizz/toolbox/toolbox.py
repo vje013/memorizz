@@ -1,66 +1,103 @@
-from typing import Dict, Any, List, Callable, Optional
+from typing import Dict, Any, List, Callable, Optional, Union, TYPE_CHECKING
 from ..memory_provider import MemoryProvider
 from ..memory_provider.memory_type import MemoryType
 from ..embeddings.openai import get_embedding
+# Use TYPE_CHECKING for forward references to avoid circular imports
+if TYPE_CHECKING:
+    from ..llms.openai import OpenAI
 import inspect
 import uuid
+from .tool_schema import ToolSchemaType
+
+# Initialize OpenAI lazily to avoid circular imports
+def get_openai():
+    from ..llms.openai import OpenAI
+    return OpenAI()
 
 class Toolbox:
     """A toolbox for managing and retrieving tools using a memory provider."""
     
-    def __init__(self, provider: MemoryProvider):
+    def __init__(self, memory_provider: MemoryProvider):
         """
         Initialize the toolbox with a memory provider.
         
         Parameters:
         -----------
-        provider : MemoryProvider
+        memory_provider : MemoryProvider
             The memory provider to use for storing and retrieving tools.
         """
-        self.provider = provider
-        self._tools: Dict[str, Callable] = {}  # In-memory storage of functions
+        self.memory_provider = memory_provider
+        
+        # In-memory storage of functions
+        self._tools: Dict[str, Callable] = {}
 
-    def register_tool(self, func: Callable) -> str:
+    def register_tool(self, func: Optional[Callable] = None, augment: bool = False) -> Union[str, Callable]:
         """
         Register a function as a tool in the toolbox.
         
         Parameters:
         -----------
-        func : Callable
-            The function to register as a tool.
-        
+        func : Callable, optional
+            The function to register as a tool. If None, returns a decorator.
+        augment : bool, optional
+            Whether to augment the tool docstring with an LLM generated description.
+            And also include to the metadata synthecially generated queries that are used in the embedding generation process and used to seach the tool.
         Returns:
         --------
-        str
-            The ID of the registered tool.
+        Union[str, Callable]
+            If func is provided, returns the tool ID. Otherwise returns a decorator.
         """
-        # Get the function's docstring and signature
-        docstring = func.__doc__ or ""
-        signature = str(inspect.signature(func))
-        
-        # Generate embedding for the tool
-        embedding = get_embedding(f"{func.__name__} {docstring} {signature}")
-        
-        # Generate a unique tool ID
-        tool_id = str(uuid.uuid4())
-        
-        # Create tool data (without the function)
-        tool_data = {
-            "tool_id": tool_id,
-            "type": "function",
-            "name": func.__name__,
-            "docstring": docstring,
-            "signature": signature,
-            "embedding": embedding
-        }
-        
-        # Store the tool metadata in the memory provider
-        self.provider.store(tool_data, memory_store_type=MemoryType.TOOLBOX)
-        
-        # Store the actual function in memory
-        self._tools[tool_id] = func
-        
-        return tool_id
+        def decorator(f: Callable) -> str:
+            # Get the function's docstring and signature
+            docstring = f.__doc__ or ""
+            signature = str(inspect.signature(f))
+            tool_id = str(uuid.uuid4())
+
+            if augment:
+                # Extend the docstring with an LLM generated description
+                docstring = self._augment_docstring(docstring)
+
+                # Generate synthecially generated queries
+                queries = self._generate_queries(docstring)
+
+                # Generate embedding for the tool using the augmented docstring, function name, signature and queries
+                embedding = get_embedding(f"{f.__name__} {docstring} {signature} {queries}")
+
+                # Get the tool metadata
+                tool_data = self._get_tool_metadata(f)
+                
+                # Create a dictionary with the tool data and embedding
+                tool_dict = {
+                    "tool_id": tool_id,
+                    "embedding": embedding,
+                    "queries": queries,
+                    **tool_data.model_dump()
+                }
+            else:
+                # Generate embedding for the tool using the function name, docstring and signature
+                embedding = get_embedding(f"{f.__name__} {docstring} {signature}")
+
+                # Get the tool metadata
+                tool_data = self._get_tool_metadata(f)
+                
+                # Create a dictionary with the tool data and embedding
+                tool_dict = {
+                    "tool_id": tool_id,
+                    "embedding": embedding,
+                    **tool_data.model_dump()
+                }
+            
+            # Store the tool metadata in the memory provider
+            self.memory_provider.store(tool_dict, memory_store_type=MemoryType.TOOLBOX)
+            
+            # Store the actual function in memory
+            self._tools[tool_id] = f
+            
+            return tool_id
+
+        if func is None:
+            return decorator
+        return decorator(func)
 
     def get_tool_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """
@@ -83,7 +120,7 @@ class Toolbox:
         
         # If not, try to get it from the provider
         # One thing to note is that the name is not unique and we get a single tool matching the name
-        tool_data = self.provider.retrieve_by_name(name, memory_store_type=MemoryType.TOOLBOX)
+        tool_data = self.memory_provider.retrieve_by_name(name, memory_store_type=MemoryType.TOOLBOX)
 
         if tool_data:
             return tool_data
@@ -104,7 +141,7 @@ class Toolbox:
         Dict[str, Any]
             The tool data, or None if not found.
         """
-        return self.provider.retrieve_by_id(id, memory_store_type=MemoryType.TOOLBOX)
+        return self.memory_provider.retrieve_by_id(id, memory_store_type=MemoryType.TOOLBOX)
 
     def get_most_similar_tools(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
@@ -122,7 +159,7 @@ class Toolbox:
         List[Dict[str, Any]]
             A list of the most similar tools.
         """
-        similar_tools = self.provider.retrieve_by_query(
+        similar_tools = self.memory_provider.retrieve_by_query(
             query,
             memory_store_type=MemoryType.TOOLBOX,
             limit=limit
@@ -155,7 +192,7 @@ class Toolbox:
             del self._tools[name]
         
         # Delete from provider
-        return self.provider.delete_by_name(name, memory_store_type=MemoryType.TOOLBOX)
+        return self.memory_provider.delete_by_name(name, memory_store_type=MemoryType.TOOLBOX)
     
     def delete_tool_by_id(self, id: str) -> bool:
         """
@@ -171,7 +208,7 @@ class Toolbox:
         bool
             True if deletion was successful, False otherwise.
         """
-        return self.provider.delete_by_id(id, memory_store_type=MemoryType.TOOLBOX)
+        return self.memory_provider.delete_by_id(id, memory_store_type=MemoryType.TOOLBOX)
     
     def delete_all(self) -> bool:
         """
@@ -182,7 +219,7 @@ class Toolbox:
         bool
             True if deletion was successful, False otherwise.
         """
-        return self.provider.delete_all(memory_store_type=MemoryType.TOOLBOX)
+        return self.memory_provider.delete_all(memory_store_type=MemoryType.TOOLBOX)
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """
@@ -193,7 +230,7 @@ class Toolbox:
         List[Dict[str, Any]]
             A list of all tools in the toolbox.
         """
-        tools = self.provider.list_all(memory_store_type=MemoryType.TOOLBOX)
+        tools = self.memory_provider.list_all(memory_store_type=MemoryType.TOOLBOX)
         
         # Add the actual functions to the results
         for tool in tools:
@@ -219,7 +256,25 @@ class Toolbox:
         bool
             True if update was successful, False otherwise.
         """
-        return self.provider.update_by_id(id, data, memory_store_type=MemoryType.TOOLBOX)
+        return self.memory_provider.update_by_id(id, data, memory_store_type=MemoryType.TOOLBOX)
+    
+    def _get_tool_metadata(self, func: Callable) -> ToolSchemaType:
+        """
+        Get the metadata for a tool.
+        """
+        return get_openai().get_tool_metadata(func)
+    
+    def _augment_docstring(self, docstring: str) -> str:
+        """
+        Augment the docstring with an LLM generated description.
+        """
+        return get_openai().augment_docstring(docstring)
+    
+    def _generate_queries(self, docstring: str) -> List[str]:
+        """
+        Generate queries for the tool.
+        """
+        return get_openai().generate_queries(docstring)
             
     
     

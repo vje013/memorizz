@@ -1,5 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
+
+# Use TYPE_CHECKING for forward references to avoid circular imports
+if TYPE_CHECKING:
+    from memorizz.memagent import MemAgent
 
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
@@ -50,6 +54,11 @@ class MemoryProvider(ABC):
         pass
 
     @abstractmethod
+    def retrieve_conversation_history_ordered_by_timestamp(self, memory_id: str) -> List[Dict[str, Any]]:
+        """Retrieve the conversation history ordered by timestamp."""
+        pass
+
+    @abstractmethod
     def update_by_id(self, id: str, data: Dict[str, Any], memory_store_type: str) -> bool:
         """Update a document in a memory store type in the memory provider by id."""
         pass
@@ -58,3 +67,28 @@ class MemoryProvider(ABC):
     def close(self) -> None:
         """Close the connection to the memory provider."""
         pass 
+
+    @abstractmethod
+    def store_memagent(self, memagent: "MemAgent") -> str:
+        """Store a memagent in the memory provider."""
+        pass
+    
+    @abstractmethod
+    def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
+        """Delete a memagent from the memory provider."""
+        pass
+
+    @abstractmethod
+    def update_memagent_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:
+        """Update the memory_ids of a memagent in the memory provider."""
+        pass
+        
+    @abstractmethod
+    def delete_memagent_memory_ids(self, agent_id: str) -> bool:
+        """Delete the memory_ids of a memagent in the memory provider."""
+        pass
+
+    @abstractmethod
+    def list_memagents(self) -> List[Dict[str, Any]]:
+        """List all memagents in the memory provider."""
+        pass

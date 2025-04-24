@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Union
 from src.memorizz.embeddings.openai import get_embedding
 from src.memorizz.persona.role_type import RoleType, PREDEFINED_INFO
 from src.memorizz.memory_provider import MemoryProvider
@@ -7,7 +8,7 @@ from src.memorizz.memory_provider.memory_type import MemoryType
 
 
 class Persona:
-    def __init__(self, name: str, role: RoleType = RoleType.GENERAL, goals: str = "", background: str = "", persona_id: str = None):
+    def __init__(self, name: str, role: Union[RoleType, str] = RoleType.GENERAL, goals: str = "", background: str = "", persona_id: str = None):
         """
         Initialize a Persona instance for an AI agent with a deterministic role.
 
@@ -15,8 +16,9 @@ class Persona:
         -----------
         name : str
             The name of the persona.
-        role : RoleType, optional
-            A predefined role for the agent (e.g., GENERAL, ASSISTANT, etc.). If not provided, the default role of GENERAL will be used.
+        role : Union[RoleType, str], optional
+            A predefined role for the agent (e.g., GENERAL, ASSISTANT, etc.) or the string value of a role. 
+            If not provided, the default role of GENERAL will be used.
         goals : str, optional
             Custom goals for the persona. If provided, these are appended to the predefined goals.
         background : str, optional
@@ -25,10 +27,29 @@ class Persona:
             A unique identifier for the persona. If not provided, one will be generated.
         """
         self.name = name
-        self.role = role.value
+        
+        # Handle both RoleType enum and string role values
+        if isinstance(role, str):
+            role_enum = None
+            # Try to match the string to a RoleType enum
+            for role_type in RoleType:
+                if role_type.value == role:
+                    role_enum = role_type
+                    break
+            # If no match is found, default to GENERAL
+            if role_enum is None:
+                role_enum = RoleType.GENERAL
+                # Store the original string value
+                self.role = role
+            else:
+                self.role = role_enum.value
+        else:
+            self.role = role.value
+            role_enum = role
+            
         # Retrieve default goals and background of the role
-        default_goals = PREDEFINED_INFO[role]["goals"]
-        default_background = PREDEFINED_INFO[role]["background"]
+        default_goals = PREDEFINED_INFO[role_enum]["goals"]
+        default_background = PREDEFINED_INFO[role_enum]["background"]
         # Append custom goals and background to the default ones
         self.goals = f"{default_goals} {goals}".strip() if goals else default_goals
         self.background = f"{default_background} {background}".strip() if background else default_background
@@ -110,7 +131,8 @@ class Persona:
         --------
         dict: The persona's JSON structure including its embedding, or None if not found.
         """
-        return provider.retrieve({"persona_id": persona_id}, memory_store_type=MemoryType.PERSONAS)
+        print(f"Retrieving persona: {persona_id} from the memory provider, in the {MemoryType.PERSONAS.value} collection")
+        return provider.retrieve_by_id(persona_id, memory_store_type=MemoryType.PERSONAS)
 
     @staticmethod
     def delete_persona(persona_id: str, provider: MemoryProvider) -> bool:
@@ -128,7 +150,7 @@ class Persona:
         --------
         bool: True if deletion was successful, False otherwise.
         """
-        return provider.delete({"persona_id": persona_id}, memory_store_type=MemoryType.PERSONAS)
+        return provider.delete_by_id(persona_id, memory_store_type=MemoryType.PERSONAS)
     
     @staticmethod
     def list_personas(provider: MemoryProvider) -> list:
@@ -145,7 +167,7 @@ class Persona:
         list: A list of all personas in the memory provider.
         """
         print(f"Listing all personas in the {MemoryType.PERSONAS.value} collection")
-        return provider.list(memory_store_type=MemoryType.PERSONAS)
+        return provider.list_all(memory_store_type=MemoryType.PERSONAS)
     
     @staticmethod
     def get_most_similar_persona(input: str, provider: MemoryProvider, limit: int = 1) -> dict:
@@ -165,7 +187,7 @@ class Persona:
         --------
         list: A list of the most similar personas.
         """
-        return provider.get_most_similar(input, memory_store_type=MemoryType.PERSONAS, limit=limit)
+        return provider.retrieve_by_query(input, memory_store_type=MemoryType.PERSONAS, limit=limit)
     
     def generate_system_prompt_input(self) -> str:
         """
