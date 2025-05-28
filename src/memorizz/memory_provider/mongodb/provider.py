@@ -136,7 +136,7 @@ class MongoDBProvider(MemoryProvider):
             
     def store(self, data: Dict[str, Any], memory_store_type: MemoryType) -> str:
         """
-        Store data in MongoDB.
+        Store data in MongoDB using only _id field as primary key.
         
         Parameters:
         -----------
@@ -148,7 +148,7 @@ class MongoDBProvider(MemoryProvider):
         Returns:
         --------
         str
-            The ID of the inserted/updated document.
+            The ID of the inserted/updated document (MongoDB _id).
         """
         # Get the appropriate collection based on memory type
         collection = None
@@ -156,29 +156,46 @@ class MongoDBProvider(MemoryProvider):
             collection = self.persona_collection
         elif memory_store_type == MemoryType.TOOLBOX:
             collection = self.toolbox_collection
+        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
+            collection = self.workflow_memory_collection
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             collection = self.short_term_memory_collection
         elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
             collection = self.long_term_memory_collection
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             collection = self.conversation_memory_collection
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            collection = self.workflow_memory_collection
 
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
 
-        # If the document has an _id, try to update it
-        if "_id" in data:
+        # Clean data by removing custom ID fields - only use MongoDB _id
+        # Note: conversation_id is preserved for CONVERSATION_MEMORY as it serves a functional purpose
+        data_copy = data.copy()
+        
+        # Remove custom ID fields since we only want to use _id
+        custom_id_fields = [
+            "persona_id", "tool_id", "workflow_id", "short_term_memory_id", 
+            "long_term_memory_id", "agent_id"
+        ]
+        
+        # Don't remove conversation_id for conversation memory
+        if memory_store_type != MemoryType.CONVERSATION_MEMORY:
+            custom_id_fields.append("conversation_id")
+            
+        for field in custom_id_fields:
+            data_copy.pop(field, None)
+        
+        # If document has MongoDB _id, update it
+        if "_id" in data_copy:
             result = collection.update_one(
-                {"_id": data["_id"]},
-                {"$set": data},
+                {"_id": data_copy["_id"]},
+                {"$set": data_copy},
                 upsert=True
             )
-            return str(data["_id"])
+            return str(data_copy["_id"])
         else:
-            # If no _id, insert as new document
-            result = collection.insert_one(data)
+            # For new documents, let MongoDB generate _id automatically
+            result = collection.insert_one(data_copy)
             return str(result.inserted_id)
 
     def retrieve_by_query(self, query: Dict[str, Any], memory_store_type: MemoryType, limit: int = 1) -> Optional[Dict[str, Any]]:
@@ -202,44 +219,58 @@ class MongoDBProvider(MemoryProvider):
             return self.retrieve_persona_by_query(query, limit=limit)
         elif memory_store_type == MemoryType.TOOLBOX:
             return self.retrieve_toolbox_item(query, limit)
+        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
+            return self.retrieve_workflow_by_query(query, limit)
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             return self.short_term_memory_collection.find(query, limit=limit)
         elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
             return self.long_term_memory_collection.find(query, limit=limit)
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self.conversation_memory_collection.find(query, limit=limit)
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.workflow_memory_collection.find(query, limit=limit)
-        
+       
     def retrieve_by_id(self, id: str, memory_store_type: MemoryType) -> Optional[Dict[str, Any]]:
         """
-        Retrieve a document from MongoDB by id.
+        Retrieve a document from MongoDB by _id.
 
         Parameters:
         -----------
         id : str
-            The id of the document to retrieve.
+            The MongoDB _id of the document to retrieve.
         memory_store_type : MemoryType
-            The type of memory store (e.g., "persona", "toolbox", etc.)§
+            The type of memory store (e.g., "persona", "toolbox", etc.)
 
         Returns:
         --------
         Optional[Dict[str, Any]]
             The retrieved document, or None if not found.
         """
-
-        if memory_store_type == MemoryType.PERSONAS:
-            return self.persona_collection.find_one({"persona_id": id}, {"embedding": 0})
-        elif memory_store_type == MemoryType.TOOLBOX:
-            return self.toolbox_collection.find_one({"tool_id": id}, {"embedding": 0})
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return self.short_term_memory_collection.find_one({"short_term_memory_id": id})
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return self.long_term_memory_collection.find_one({"long_term_memory_id": id})
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return self.conversation_memory_collection.find_one({"conversation_id": id})
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.workflow_memory_collection.find_one({"workflow_id": id})
+        # Get the appropriate collection
+        collection_mapping = {
+            MemoryType.PERSONAS: self.persona_collection,
+            MemoryType.TOOLBOX: self.toolbox_collection,
+            MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
+            MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
+            MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+        }
+        
+        collection = collection_mapping.get(memory_store_type)
+        if collection is None:
+            return None
+            
+        # Set projection to exclude embedding for performance
+        projection = {"embedding": 0} if memory_store_type in [
+            MemoryType.PERSONAS, MemoryType.TOOLBOX, MemoryType.WORKFLOW_MEMORY
+        ] else None
+        
+        # Retrieve using MongoDB _id only
+        try:
+            if ObjectId.is_valid(id):
+                return collection.find_one({"_id": ObjectId(id)}, projection)
+        except Exception:
+            pass
+            
+        return None
     
     def retrieve_by_name(self, name: str, memory_store_type: MemoryType) -> Optional[Dict[str, Any]]:
         """
@@ -261,18 +292,19 @@ class MongoDBProvider(MemoryProvider):
             # Use projection in find_one directly
             return self.toolbox_collection.find_one(
                 {"name": name},
-                {"embedding": 0}  # Exclude embedding field
+                {"embedding": 0}
             )
         elif memory_store_type == MemoryType.PERSONAS:
             return self.persona_collection.find_one({"name": name}, {"embedding": 0})
+        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
+            return self.workflow_memory_collection.find_one({"name": name}, {"embedding": 0})
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             return self.short_term_memory_collection.find_one({"name": name})
         elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
             return self.long_term_memory_collection.find_one({"name": name})
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self.conversation_memory_collection.find_one({"name": name})
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.workflow_memory_collection.find_one({"name": name})
+        
 
 
     def retrieve_persona_by_query(self, query: Dict[str, Any], limit: int = 1) -> Optional[Dict[str, Any]]:
@@ -365,15 +397,63 @@ class MongoDBProvider(MemoryProvider):
 
         # Return the results
         return results if results else None
+    
+    def retrieve_workflow_by_query(self, query: Dict[str, Any], limit: int = 1) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve a workflow or several workflows from MongoDB.
+        This function uses a vector search to retrieve the most similar workflows.
+
+        Parameters:
+        -----------
+        query : Dict[str, Any]
+            The query to use for retrieval.
+        limit : int
+            The maximum number of workflows to return.
+            
+        Returns:
+        --------
+        Optional[List[Dict[str, Any]]]
+            The retrieved workflows, or None if not found.
+        """
+
+        # Get the embedding for the query
+        embedding = get_embedding(query)
+
+        # Create the vector search pipeline
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "queryVector": embedding,
+                    "path": "embedding",
+                    "numCandidates": 100,
+                    "limit": limit,
+                    "index": "vector_index"
+                }
+            },
+            {
+                "$project": {
+                    "_id": 1,
+                    "embedding": 0,
+                    "score": { "$meta": "vectorSearchScore" }
+                }
+            }
+        ]
+
+        # Execute the vector search
+        results = list(self.workflow_memory_collection.aggregate(pipeline))
+
+        # Return the results
+        return results if results else None
+
 
     def delete_by_id(self, id: str, memory_store_type: MemoryType) -> bool:
         """
-        Delete a document from MongoDB by id.
+        Delete a document from MongoDB by _id.
         
         Parameters:
         -----------
         id : str
-            The id of the document to delete.
+            The MongoDB _id of the document to delete.
         memory_store_type : MemoryType
             The type of memory store (e.g., "persona", "toolbox", etc.)
         
@@ -382,20 +462,29 @@ class MongoDBProvider(MemoryProvider):
         bool
             True if deletion was successful, False otherwise.
         """
-        if memory_store_type == MemoryType.PERSONAS:
-            result = self.persona_collection.delete_one({"persona_id": id})
-        elif memory_store_type == MemoryType.TOOLBOX:
-            result = self.toolbox_collection.delete_one({"tool_id": id})
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            result = self.short_term_memory_collection.delete_one({"short_term_memory_id": id})
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            result = self.long_term_memory_collection.delete_one({"long_term_memory_id": id})
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            result = self.conversation_memory_collection.delete_one({"conversation_id": id})
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            result = self.workflow_memory_collection.delete_one({"workflow_id": id})
+        # Get the appropriate collection
+        collection_mapping = {
+            MemoryType.PERSONAS: self.persona_collection,
+            MemoryType.TOOLBOX: self.toolbox_collection,
+            MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
+            MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
+            MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+        }
+        
+        collection = collection_mapping.get(memory_store_type)
+        if collection is None:
+            return False
             
-        return result.deleted_count > 0
+        # Delete using MongoDB _id only
+        try:
+            if ObjectId.is_valid(id):
+                result = collection.delete_one({"_id": ObjectId(id)})
+                return result.deleted_count > 0
+        except Exception:
+            pass
+            
+        return False
     
     def delete_by_name(self, name: str, memory_store_type: MemoryType) -> bool:
         """
@@ -488,12 +577,12 @@ class MongoDBProvider(MemoryProvider):
         
     def update_by_id(self, id: str, data: Dict[str, Any], memory_store_type: MemoryType) -> bool:
         """
-        Update a document in a memory store type in MongoDB by id.
+        Update a document in a memory store type in MongoDB by _id.
 
         Parameters:
         -----------
         id : str
-            The id of the document to update.
+            The MongoDB _id of the document to update.
         data : Dict[str, Any]
             The data to update the document with.
         memory_store_type : MemoryType
@@ -504,47 +593,56 @@ class MongoDBProvider(MemoryProvider):
         bool
             True if update was successful, False otherwise.
         """
-        if memory_store_type == MemoryType.PERSONAS:
-            result = self.persona_collection.update_one({"persona_id": id}, {"$set": data})
-        elif memory_store_type == MemoryType.TOOLBOX:
-
-
-            result = self.toolbox_collection.update_one({"tool_id": id}, {"$set": data})
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            result = self.short_term_memory_collection.update_one({"short_term_memory_id": id}, {"$set": data})
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            result = self.long_term_memory_collection.update_one({"long_term_memory_id": id}, {"$set": data})
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            result = self.conversation_memory_collection.update_one({"conversation_id": id}, {"$set": data})
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            result = self.workflow_memory_collection.update_one({"workflow_id": id}, {"$set": data})
+        # Get the appropriate collection
+        collection_mapping = {
+            MemoryType.PERSONAS: self.persona_collection,
+            MemoryType.TOOLBOX: self.toolbox_collection,
+            MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
+            MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
+            MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+        }
+        
+        collection = collection_mapping.get(memory_store_type)
+        if collection is None:
+            return False
             
-        return result.modified_count > 0
+        # Update using MongoDB _id only
+        try:
+            if ObjectId.is_valid(id):
+                result = collection.update_one({"_id": ObjectId(id)}, {"$set": data})
+                return result.modified_count > 0
+        except Exception:
+            pass
+            
+        return False
             
             
     def update_toolbox_item(self, id: str, data: Dict[str, Any]) -> bool:
         """
-        Update a toolbox item in MongoDB by id.
+        Update a toolbox item in MongoDB by id using optimized queries.
         """
 
-        # Update the emebdding if the name, docstring or signature has changed
+        # Update the embedding if the name, docstring or signature has changed
 
         # Get the old data
         old_data = self.retrieve_by_id(id, MemoryType.TOOLBOX)
+        if not old_data:
+            return False
 
         # Concatenate the name, docstring and signature if any of them have changed
-        if old_data["name"] != data["name"]:
-            data["name"] = data["name"]
-        if old_data["docstring"] != data["docstring"]:
-            data["docstring"] = data["docstring"]
-        if old_data["signature"] != data["signature"]:
-            data["signature"] = data["signature"]
+        if old_data.get("name") != data.get("name"):
+            data["name"] = data.get("name", old_data.get("name", ""))
+        if old_data.get("docstring") != data.get("docstring"):
+            data["docstring"] = data.get("docstring", old_data.get("docstring", ""))
+        if old_data.get("signature") != data.get("signature"):
+            data["signature"] = data.get("signature", old_data.get("signature", ""))
 
         # Update the embedding
         data["embedding"] = get_embedding(data["name"] + " " + data["docstring"] + " " + data["signature"])
 
-        result = self.toolbox_collection.update_one({"tool_id": id}, {"$set": data})
-        return result.modified_count > 0
+        # Use the optimized update_by_id method
+        return self.update_by_id(id, data, MemoryType.TOOLBOX)
     
 
     def retrieve_conversation_history_ordered_by_timestamp(self, memory_id: str) -> List[Dict[str, Any]]:
@@ -593,8 +691,7 @@ class MongoDBProvider(MemoryProvider):
             pass
             # TODO: return self.get_task_memory_components(query, memory_id, limit)
         elif memory_type == MemoryType.WORKFLOW_MEMORY:
-            pass
-            # TODO: return self.get_workflow_memory_components(query, memory_id, limit)
+            return self.get_workflow_memory_components(query, query_embedding, memory_id, limit)
 
 
     def get_conversation_memory_components(self, query: str = None, query_embedding: list[float] = None, memory_id: str = None, limit: int = 5) -> List[Dict[str, Any]]:
@@ -638,7 +735,6 @@ class MongoDBProvider(MemoryProvider):
             vector_stage,
             {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
             {"$sort": {"score": -1, "timestamp": 1}},
-            {"$unset": ["_id"]},
         ]
 
         # Execute the pipeline
@@ -649,7 +745,7 @@ class MongoDBProvider(MemoryProvider):
     
     def store_memagent(self, memagent: "MemAgentModel") -> "MemAgentModel":
         """
-        Store a memagent in the MongoDB database.
+        Store a memagent in the MongoDB database using only _id field.
         
         Parameters:
         -----------
@@ -661,13 +757,11 @@ class MongoDBProvider(MemoryProvider):
         MemAgentModel
             The stored memagent.
         """
-
-        # Check to ensure the memagent agent_id doesn't already exist
-        if self.memagent_collection.find_one({"agent_id": memagent.agent_id}):
-            raise ValueError(f"MemAgent with id {memagent.agent_id} already exists")
-        
         # Convert the MemAgentModel to a dictionary
         memagent_dict = memagent.model_dump()
+        
+        # Remove agent_id field since we only want to use _id
+        memagent_dict.pop("agent_id", None)
         
         # Convert persona to a serializable format if it exists
         if memagent.persona:
@@ -680,17 +774,24 @@ class MongoDBProvider(MemoryProvider):
                 if "function" in tool and callable(tool["function"]):
                     del tool["function"]
         
-        self.memagent_collection.insert_one(memagent_dict)
+        # Insert the document and let MongoDB generate _id automatically
+        result = self.memagent_collection.insert_one(memagent_dict)
+        
+        # Add the generated _id to the response
+        memagent_dict["_id"] = result.inserted_id
 
         return memagent_dict
     
     def update_memagent(self, memagent: "MemAgentModel") -> "MemAgentModel":
         """
-        Update a memagent in the MongoDB database.
+        Update a memagent in the MongoDB database using _id field.
         """
         # Convert the MemAgentModel to a dictionary
         memagent_dict = memagent.model_dump()
 
+        # Remove agent_id field since we only want to use _id
+        agent_id = memagent_dict.pop("agent_id", None)
+        
         # Convert persona to a serializable format if it exists
         if memagent.persona:
             memagent_dict["persona"] = memagent.persona.to_dict()
@@ -701,20 +802,24 @@ class MongoDBProvider(MemoryProvider):
                 if "function" in tool and callable(tool["function"]):
                     del tool["function"]
         
-        # Update the memagent in the MongoDB database
-        self.memagent_collection.update_one({"agent_id": memagent.agent_id}, {"$set": memagent_dict})
-
+        # Update the memagent in the MongoDB database using _id
+        if agent_id and ObjectId.is_valid(agent_id):
+            self.memagent_collection.update_one(
+                {"_id": ObjectId(agent_id)}, 
+                {"$set": memagent_dict}
+            )
+        
         return memagent_dict
 
     
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
         """
-        Retrieve a memagent from the MongoDB database.
+        Retrieve a memagent from the MongoDB database using _id field.
         
         Parameters:
         -----------
         agent_id : str
-            The agent ID to retrieve.
+            The agent ID to retrieve (MongoDB _id).
         
         Returns:
         --------
@@ -723,18 +828,26 @@ class MongoDBProvider(MemoryProvider):
         """
         from src.memorizz.memory_component.memory_mode import MemoryMode
         
-        # Get the document from MongoDB
-        document = self.memagent_collection.find_one({"agent_id": agent_id})
+        # Get the document from MongoDB using _id
+        try:
+            if ObjectId.is_valid(agent_id):
+                document = self.memagent_collection.find_one({"_id": ObjectId(agent_id)})
+            else:
+                return None
+        except Exception:
+            return None
+        
         if not document:
             return None
         
         # Create a new MemAgent with data from the document
+        # Use the MongoDB _id as agent_id since we no longer store agent_id field
         memagent = MemAgentModel(
             instruction=document.get("instruction"),
             memory_mode=document.get("memory_mode"),
             max_steps=document.get("max_steps"),
             memory_ids=document.get("memory_ids") or [],
-            agent_id=document.get("agent_id"),
+            agent_id=str(document.get("_id")),
             tools=document.get("tools"),
             memory_provider=self
         )
@@ -766,23 +879,7 @@ class MongoDBProvider(MemoryProvider):
 
         return memagent
     
-    def delete_memagent(self, agent_id: str) -> bool:
-        """
-        Delete a memagent from the memory provider.
 
-        Parameters:
-        -----------
-        agent_id : str
-            The id of the memagent to delete.
-
-        Returns:
-        --------
-        bool
-            True if deletion was successful, False otherwise.
-        """
-        result = self.memagent_collection.delete_one({"agent_id": agent_id})
-
-        return result.deleted_count > 0
     
     def list_memagents(self) -> List["MemAgentModel"]:
         """
@@ -798,12 +895,13 @@ class MongoDBProvider(MemoryProvider):
         agents = []
         
         for doc in documents:
+            # Use the MongoDB _id as agent_id since we no longer store agent_id field
             agent = MemAgentModel(
                 instruction=doc.get("instruction"),
                 memory_mode=doc.get("memory_mode"),
                 max_steps=doc.get("max_steps"),
                 memory_ids=doc.get("memory_ids") or [],
-                agent_id=doc.get("agent_id"),
+                agent_id=str(doc.get("_id")),
                 tools=doc.get("tools"),  # Include tools from document
                 memory_provider=self
             )
@@ -840,12 +938,12 @@ class MongoDBProvider(MemoryProvider):
     
     def update_memagent_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:
         """
-        Update the memory_ids of a memagent in the memory provider.
+        Update the memory_ids of a memagent in the memory provider using _id field.
 
         Parameters:
         -----------
         agent_id : str
-            The id of the memagent to update.
+            The id of the memagent to update (MongoDB _id).
         memory_ids : List[str]
             The list of memory_ids to update.
 
@@ -854,12 +952,17 @@ class MongoDBProvider(MemoryProvider):
         bool
             True if update was successful, False otherwise.
         """
-        result = self.memagent_collection.update_one(
-            {"agent_id": agent_id}, 
-            {"$set": {"memory_ids": memory_ids}}
-        )
-
-        return result.modified_count > 0
+        try:
+            if ObjectId.is_valid(agent_id):
+                result = self.memagent_collection.update_one(
+                    {"_id": ObjectId(agent_id)}, 
+                    {"$set": {"memory_ids": memory_ids}}
+                )
+                return result.modified_count > 0
+            else:
+                return False
+        except Exception:
+            return False
     
     def delete_memagent_memory_ids(self, agent_id: str) -> bool:
         """
@@ -868,16 +971,24 @@ class MongoDBProvider(MemoryProvider):
         Parameters:
         -----------
         agent_id : str
-            The id of the memagent to update.
+            The id of the memagent to update (MongoDB _id).
 
         Returns:
         --------
         bool
             True if deletion was successful, False otherwise.
         """
-        result = self.memagent_collection.update_one({"agent_id": agent_id}, {"$unset": {"memory_ids": []}})
-
-        return result.modified_count > 0
+        try:
+            if ObjectId.is_valid(agent_id):
+                result = self.memagent_collection.update_one(
+                    {"_id": ObjectId(agent_id)}, 
+                    {"$unset": {"memory_ids": []}}
+                )
+                return result.modified_count > 0
+            else:
+                return False
+        except Exception:
+            return False
     
     def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
         """
@@ -908,9 +1019,16 @@ class MongoDBProvider(MemoryProvider):
                 for memory_type in MemoryType:
                     self._delete_memory_components_by_memory_id(memory_id, memory_type)
         else:
-            result = self.memagent_collection.delete_one({"agent_id": agent_id})
+            try:
+                if ObjectId.is_valid(agent_id):
+                    result = self.memagent_collection.delete_one({"_id": ObjectId(agent_id)})
+                    return result.deleted_count > 0
+                else:
+                    return False
+            except Exception:
+                return False
 
-        return result.deleted_count > 0
+        return True
     
     def _delete_memory_components_by_memory_id(self, memory_id: str, memory_type: MemoryType):
         """

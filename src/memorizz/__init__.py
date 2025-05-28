@@ -1,7 +1,7 @@
 from .memory_provider import MemoryProvider
 from .memory_provider.mongodb import MongoDBProvider
 from .persona import Persona, RoleType
-from .toolbox import Toolbox
+from .toolbox.toolbox import Toolbox
 from .memagent import MemAgent
 
 __all__ = [

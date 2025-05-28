@@ -21,7 +21,9 @@ dependencies = [
     "openai",
     "pymongo",
     "langchain_ollama",
-    "ollama"
+    "ollama",
+    "psycopg2-binary",
+    "numpy"
 ]
 
 [project.urls]

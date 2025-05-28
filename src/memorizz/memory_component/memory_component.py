@@ -138,7 +138,10 @@ class MemoryComponent:
         memory_components = self.memory_provider.retrieve_memory_components_by_query(query, self.query_embedding, memory_id, memory_type, limit)
 
         # Get the surronding conversation ids from each of the memory components
-        surrounding_conversation_ids = [memory_component["conversation_id"] for memory_component in memory_components]
+        # Handle cases where conversation_id might be missing or _id is used instead
+        surrounding_conversation_ids = []
+        for memory_component in memory_components:
+            surrounding_conversation_ids.append(memory_component["_id"])
 
         # Before returning the memory components, we need to update the memory signals within the memory components
         for memory_component in memory_components:
@@ -168,8 +171,9 @@ class MemoryComponent:
         # Update the recall_recency field (how recently the memory component was recalled), this is the current timestamp
         memory_component["recall_recency"] = time.time()
 
-        # Update the importance field with a list of calling ID and surronding ID's
-        memory_component["associated_conversation_ids"] = surrounding_conversation_ids
+        if memory_type == MemoryType.CONVERSATION_MEMORY:
+            # Update the importance field with a list of calling ID and surronding conversation ID's
+            memory_component["associated_conversation_ids"] = surrounding_conversation_ids
 
         # Save the memory component to the memory provider
         self._save_memory_component(memory_component)

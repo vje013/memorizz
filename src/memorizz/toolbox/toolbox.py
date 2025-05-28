@@ -8,6 +8,7 @@ if TYPE_CHECKING:
 import inspect
 import uuid
 from .tool_schema import ToolSchemaType
+from bson import ObjectId
 
 # Initialize OpenAI lazily to avoid circular imports
 def get_openai():
@@ -51,7 +52,10 @@ class Toolbox:
             # Get the function's docstring and signature
             docstring = f.__doc__ or ""
             signature = str(inspect.signature(f))
-            tool_id = str(uuid.uuid4())
+            
+            # Pre-generate MongoDB ObjectId to use as both database _id and in-memory key
+            object_id = ObjectId()
+            object_id_str = str(object_id)
 
             if augment:
                 # Extend the docstring with an LLM generated description
@@ -66,9 +70,9 @@ class Toolbox:
                 # Get the tool metadata
                 tool_data = self._get_tool_metadata(f)
                 
-                # Create a dictionary with the tool data and embedding
+                # Create a dictionary with the tool data and embedding using pre-generated _id
                 tool_dict = {
-                    "tool_id": tool_id,
+                    "_id": object_id,  # Use pre-generated ObjectId as _id
                     "embedding": embedding,
                     "queries": queries,
                     **tool_data.model_dump()
@@ -80,9 +84,9 @@ class Toolbox:
                 # Get the tool metadata
                 tool_data = self._get_tool_metadata(f)
                 
-                # Create a dictionary with the tool data and embedding
+                # Create a dictionary with the tool data and embedding using pre-generated _id
                 tool_dict = {
-                    "tool_id": tool_id,
+                    "_id": object_id,  # Use pre-generated ObjectId as _id
                     "embedding": embedding,
                     **tool_data.model_dump()
                 }
@@ -90,10 +94,10 @@ class Toolbox:
             # Store the tool metadata in the memory provider
             self.memory_provider.store(tool_dict, memory_store_type=MemoryType.TOOLBOX)
             
-            # Store the actual function in memory
-            self._tools[tool_id] = f
+            # Store the actual function in memory using ObjectId string as key
+            self._tools[object_id_str] = f
             
-            return tool_id
+            return object_id_str
 
         if func is None:
             return decorator
@@ -157,7 +161,7 @@ class Toolbox:
         Returns:
         --------
         List[Dict[str, Any]]
-            A list of the most similar tools.
+            A list of the most similar tool metadata (without actual function objects).
         """
         similar_tools = self.memory_provider.retrieve_by_query(
             query,
@@ -165,12 +169,8 @@ class Toolbox:
             limit=limit
         )
         
-        # Add the actual functions to the results
-        for tool in similar_tools:
-            tool_id = tool.get("tool_id")
-            if tool_id in self._tools:
-                tool["function"] = self._tools[tool_id]
-        
+        # Return just the metadata - do NOT add actual function objects
+        # The functions are kept separate in self._tools for execution
         return similar_tools
 
     def delete_tool_by_name(self, name: str) -> bool:
@@ -187,11 +187,15 @@ class Toolbox:
         bool
             True if deletion was successful, False otherwise.
         """
-        # Delete from memory
-        if name in self._tools:
-            del self._tools[name]
+        # Find the tool by name first to get its _id
+        tool_data = self.memory_provider.retrieve_by_name(name, memory_store_type=MemoryType.TOOLBOX)
+        if tool_data:
+            tool_id = str(tool_data.get("_id"))
+            # Delete from memory using _id
+            if tool_id in self._tools:
+                del self._tools[tool_id]
         
-        # Delete from provider
+        # Delete from provider by name
         return self.memory_provider.delete_by_name(name, memory_store_type=MemoryType.TOOLBOX)
     
     def delete_tool_by_id(self, id: str) -> bool:
@@ -208,6 +212,11 @@ class Toolbox:
         bool
             True if deletion was successful, False otherwise.
         """
+        # Delete from in-memory storage first
+        if id in self._tools:
+            del self._tools[id]
+        
+        # Delete from provider
         return self.memory_provider.delete_by_id(id, memory_store_type=MemoryType.TOOLBOX)
     
     def delete_all(self) -> bool:
@@ -219,6 +228,10 @@ class Toolbox:
         bool
             True if deletion was successful, False otherwise.
         """
+        # Clear in-memory storage
+        self._tools.clear()
+        
+        # Delete from provider
         return self.memory_provider.delete_all(memory_store_type=MemoryType.TOOLBOX)
     
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -228,18 +241,30 @@ class Toolbox:
         Returns:
         --------
         List[Dict[str, Any]]
-            A list of all tools in the toolbox.
+            A list of all tools metadata in the toolbox (without actual function objects).
         """
         tools = self.memory_provider.list_all(memory_store_type=MemoryType.TOOLBOX)
         
-        # Add the actual functions to the results
-        for tool in tools:
-            tool_id = tool.get("tool_id")
-            if tool_id in self._tools:
-                tool["function"] = self._tools[tool_id]
-        
+        # Return just the metadata - do NOT add actual function objects
+        # The functions are kept separate in self._tools for execution
         return tools
     
+    def get_function_by_id(self, tool_id: str) -> Optional[Callable]:
+        """
+        Get the actual executable function by tool ID.
+        
+        Parameters:
+        -----------
+        tool_id : str
+            The ID of the tool whose function to retrieve.
+        
+        Returns:
+        --------
+        Optional[Callable]
+            The actual function object, or None if not found.
+        """
+        return self._tools.get(tool_id)
+
     def update_tool_by_id(self, id: str, data: Dict[str, Any]) -> bool:
         """
         Update a tool in the toolbox by id.
