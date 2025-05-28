@@ -9,8 +9,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, project_root)
 load_dotenv()
 
-from src.memorizz.memagent import MemAgent
-from src.memorizz.memory_provider.mongodb.provider import MongoDBConfig, MongoDBProvider
+from ..memagent import MemAgent
+from ..memory_provider.mongodb.provider import MongoDBConfig, MongoDBProvider
 
 
 

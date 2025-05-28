@@ -1,11 +1,12 @@
 import uuid
-from typing import Union
+from typing import Union, Optional, Dict, Any
+from enum import Enum
 from bson import ObjectId
 from datetime import datetime
-from src.memorizz.memory_provider import MemoryProvider
-from src.memorizz.embeddings.openai import get_embedding
-from src.memorizz.memory_provider.memory_type import MemoryType
-from src.memorizz.persona.role_type import RoleType, PREDEFINED_INFO
+from ..memory_provider import MemoryProvider
+from ..embeddings.openai import get_embedding
+from ..memory_provider.memory_type import MemoryType
+from .role_type import RoleType, PREDEFINED_INFO
 
 
 class Persona:

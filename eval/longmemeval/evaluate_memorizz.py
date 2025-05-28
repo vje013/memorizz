@@ -29,9 +29,16 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from src.memorizz import MemAgent, MemoryProvider
-    from src.memorizz.memory_provider.mongodb import MongoDBProvider, MongoDBConfig
-    from src.memorizz.llms.openai import OpenAI
+    # Try importing from installed package first, then fall back to local development
+    try:
+        from memorizz import MemAgent, MemoryProvider
+        from memorizz.memory_provider.mongodb import MongoDBProvider, MongoDBConfig
+        from memorizz.llms.openai import OpenAI
+    except ImportError:
+        # Fall back to local development imports
+        from src.memorizz import MemAgent, MemoryProvider
+        from src.memorizz.memory_provider.mongodb import MongoDBProvider, MongoDBConfig
+        from src.memorizz.llms.openai import OpenAI
 except ImportError as e:
     print(f"Error importing Memorizz: {e}")
     print("Make sure you're running from the project root and Memorizz is properly installed.")

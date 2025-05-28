@@ -3,22 +3,22 @@ from pymongo.operations import SearchIndexModel
 from ..base import MemoryProvider
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
-from src.memorizz.memory_provider.memory_type import MemoryType
-from src.memorizz.embeddings.openai import get_embedding
-from src.memorizz.embeddings.openai import get_embedding_dimensions
+from ..memory_type import MemoryType
+from ...embeddings.openai import get_embedding
+from ...embeddings.openai import get_embedding_dimensions
 from bson import ObjectId
 from pymongo.collection import Collection
 from pymongo.database import Database
 from datetime import datetime
 import pprint
-from src.memorizz.memory_component.memory_mode import MemoryMode
-from src.memorizz.memagent import MemAgentModel
-from src.memorizz.persona.persona import Persona
-from src.memorizz.persona.role_type import RoleType
+from ...memory_component.memory_mode import MemoryMode
+from ...memagent import MemAgentModel
+from ...persona.persona import Persona
+from ...persona.role_type import RoleType
 
 # Use TYPE_CHECKING for forward references to avoid circular imports
 # if TYPE_CHECKING:
-#     from src.memorizz.memagent import MemAgentModel
+#     from ...memagent import MemAgentModel
 
 @dataclass
 class MongoDBConfig():
@@ -826,7 +826,7 @@ class MongoDBProvider(MemoryProvider):
         MemAgentModel
             The retrieved memagent.
         """
-        from src.memorizz.memory_component.memory_mode import MemoryMode
+        from ...memory_component.memory_mode import MemoryMode
         
         # Get the document from MongoDB using _id
         try:

@@ -1,20 +1,21 @@
 import psycopg2
 import psycopg2.extras
 from psycopg2.extensions import register_adapter, AsIs
-import json
-import uuid
+from psycopg2.errors import DuplicateTable, DuplicateObject
+from ..base import MemoryProvider
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
-from datetime import datetime
-import numpy as np
-
-from ..base import MemoryProvider
 from ..memory_type import MemoryType
-from src.memorizz.embeddings.openai import get_embedding, get_embedding_dimensions
+import json
+import uuid
+import numpy as np
+from datetime import datetime, timezone
+from ...memory_component.memory_mode import MemoryMode
+from ...embeddings.openai import get_embedding, get_embedding_dimensions
 
 # Use TYPE_CHECKING for forward references to avoid circular imports
 if TYPE_CHECKING:
-    from src.memorizz.memagent import MemAgentModel
+    from ...memagent import MemAgentModel
 
 # Register numpy array adapter for PostgreSQL
 def adapt_numpy_array(numpy_array):
