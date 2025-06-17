@@ -1,10 +1,12 @@
 import uuid
+from typing import Union, Optional, Dict, Any
+from enum import Enum
+from bson import ObjectId
 from datetime import datetime
-from typing import Union
-from src.memorizz.embeddings.openai import get_embedding
-from src.memorizz.persona.role_type import RoleType, PREDEFINED_INFO
-from src.memorizz.memory_provider import MemoryProvider
-from src.memorizz.memory_provider.memory_type import MemoryType
+from ..memory_provider import MemoryProvider
+from ..embeddings.openai import get_embedding
+from ..memory_provider.memory_type import MemoryType
+from .role_type import RoleType, PREDEFINED_INFO
 
 
 class Persona:
@@ -65,8 +67,9 @@ class Persona:
 
     @staticmethod
     def generate_persona_id() -> str:
-        """Generate a unique persona ID using UUID4."""
-        return str(uuid.uuid4())
+        """Generate a unique persona ID optimized for MongoDB."""
+        # Generate MongoDB ObjectId for better performance
+        return str(ObjectId())
 
     def _generate_embedding(self):
         """

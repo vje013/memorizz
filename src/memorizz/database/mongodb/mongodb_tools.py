@@ -12,6 +12,9 @@ from dataclasses import dataclass
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress httpx logs to reduce noise from API requests
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 @dataclass
 class MongoDBToolsConfig:
     mongo_uri: Optional[str] = None

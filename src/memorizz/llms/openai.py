@@ -1,7 +1,11 @@
 import os
 import json
 import openai
+import logging
 from typing import Callable, List, Optional, TYPE_CHECKING, Dict, Any
+
+# Suppress httpx logs to reduce noise from API requests
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Use TYPE_CHECKING for forward references to avoid circular imports
 if TYPE_CHECKING:

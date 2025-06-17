@@ -35,3 +35,9 @@ Thumbs.db
 
 # Test Notebooks
 dev_test.ipynb
+
+# Environment variables
+.env
+
+# Examples folder (local testing only)
+src/memorizz/examples/

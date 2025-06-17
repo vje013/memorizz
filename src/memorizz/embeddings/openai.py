@@ -7,6 +7,9 @@ from typing import List
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress httpx logs to reduce noise from API requests
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 openai_client = openai.OpenAI()
 
 def get_embedding(text: str, model: str = "text-embedding-3-small", dimensions: int = 256) -> List[float]:

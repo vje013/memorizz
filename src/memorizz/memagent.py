@@ -1,18 +1,23 @@
-from ..memorizz.toolbox import Toolbox
-from ..memorizz.llms.openai import OpenAI
-from ..memorizz.persona import Persona
+from .toolbox import Toolbox
+from .llms.openai import OpenAI
+from .persona import Persona
 from typing import Optional, Union, List, Dict, Any
 import json
-from ..memorizz.memory_component import MemoryComponent, ConversationMemoryComponent
+from .memory_component import MemoryComponent, ConversationMemoryComponent
 from datetime import datetime
 import uuid
-from ..memorizz.memory_provider import MemoryProvider
-from ..memorizz.memory_component.memory_mode import MemoryMode
-from ..memorizz.memory_provider.memory_type import MemoryType
+from .memory_provider import MemoryProvider
+from .memory_component.memory_mode import MemoryMode
+from .memory_provider.memory_type import MemoryType
 import logging
 from pydantic import BaseModel
-from ..memorizz.toolbox.tool_schema import ToolSchemaType
+from .toolbox.tool_schema import ToolSchemaType
 from typing import Callable
+from .workflow.workflow import Workflow, WorkflowOutcome
+from .context_window_management.cwm import CWM
+from .long_term_memory import KnowledgeBase
+from bson import ObjectId
+
 logger = logging.getLogger(__name__)
 
 class Role:
@@ -31,6 +36,7 @@ class MemAgentModel(BaseModel):
     max_steps: int = 20
     memory_ids: Optional[List[str]] = None
     tool_access: Optional[str] = "private"
+    long_term_memory_ids: Optional[List[str]] = None
     
     model_config = {
         "arbitrary_types_allowed": True  # Allow arbitrary types like Toolbox
@@ -58,7 +64,9 @@ class MemAgent:
         self.memory_component = MemoryComponent(memory_mode, self.memory_provider)
 
         # Initialize the model if not provided
-        self.model = model or OpenAI(model="gpt-4.1")
+        # TODO: Remove this once we have a way to pass the model to the agent
+        # TODO: Below needs to be configured globally and not per agent
+        self.model = OpenAI(model="gpt-4.1")
         
         # If the memory provider is provided and the agent id is provided, then we load the memagent from the memory provider
         if memory_provider and agent_id:
@@ -66,8 +74,6 @@ class MemAgent:
                 # Load the memagent from the memory provider
                 loaded_agent = memory_provider.retrieve_memagent(agent_id)
                 if loaded_agent:
-                    print(f"Loaded agent: {loaded_agent}")
-                    print(f"Loaded agent tools: {loaded_agent.tools}")
                     # Copy all the attributes from the loaded agent to self
                     for key, value in vars(loaded_agent).items():
                         setattr(self, key, value)
@@ -100,6 +106,71 @@ class MemAgent:
             
         self.agent_id = agent_id
 
+        # If tools is a Toolbox, properly initialize it using the same logic as add_tool
+        if isinstance(tools, Toolbox):
+            self._initialize_tools_from_toolbox(tools)
+
+    def _initialize_tools_from_toolbox(self, toolbox: Toolbox):
+        """
+        Initialize tools from a Toolbox using the same logic as add_tool.
+        This ensures proper function reference management and tool metadata handling.
+        
+        Parameters:
+            toolbox (Toolbox): The Toolbox instance to initialize tools from.
+        """
+        if not isinstance(toolbox, Toolbox):
+            raise TypeError(f"Expected a Toolbox, got {type(toolbox)}")
+        
+        # Convert to list format for agent use
+        self.tools = []
+        
+        for meta in toolbox.list_tools():
+            # Use _id for function lookup
+            tid = str(meta.get("_id"))
+            if tid:
+                # Resolve the Python callable from the provided Toolbox
+                python_fn = toolbox._tools.get(tid)
+                if not callable(python_fn):
+                    # fallback: perhaps the stored metadata itself packs a .function field?
+                    if meta and callable(meta.get("function")):
+                        python_fn = meta["function"]
+
+                if callable(python_fn):
+                    # build the new entry
+                    new_entry = self._build_entry(meta, python_fn)
+                    self.tools.append(new_entry)
+                else:
+                    # Silently skip tools without functions
+                    logger.warning(f"Skipping tool with _id {tid} - no callable function found")
+                    continue
+
+    def _build_entry(self, meta: dict, python_fn: Callable) -> dict:
+        """
+        Construct the flat OpenAI‐style schema entry and
+        register the python_fn in our internal lookup.
+        
+        Parameters:
+            meta (dict): Tool metadata containing function information
+            python_fn (Callable): The Python function to register
+            
+        Returns:
+            dict: Formatted tool entry for OpenAI API
+        """
+        entry = {
+            "_id":        meta["_id"],  # Use _id as primary identifier
+            "name":       meta["function"]["name"],
+            "description":meta["function"]["description"],
+            "parameters": meta["function"]["parameters"],
+            # preserve strict‐mode flag if present:
+            **({"strict": meta.get("strict", True)}),
+        }
+        # keep a private map of _id → python function,
+        # but don't include it when serializing the agent's 'tools' list
+        self._tool_functions = getattr(self, "_tool_functions", {})
+        self._tool_functions[str(meta["_id"])] = python_fn
+
+        return entry
+
     def _generate_system_prompt(self):
         """
         Generate the system prompt for the agent.
@@ -127,6 +198,7 @@ class MemAgent:
             return f"{self.instruction}"
         
 
+    @staticmethod
     def _format_tool(tool_meta: Dict[str, Any]) -> Dict[str,Any]:
         """
         Format the tool.
@@ -140,28 +212,73 @@ class MemAgent:
             Dict[str, Any]: The formatted tool.
         """
 
+        # Handle different tool metadata structures
+        # Case 1: Tool has proper 'function' metadata structure
+        if "function" in tool_meta and isinstance(tool_meta["function"], dict):
+            function_data = tool_meta["function"]
+            name = function_data.get("name", "unknown_tool")
+            description = function_data.get("description", "No description available")
+            parameters = function_data.get("parameters", [])
+        # Case 2: Tool has flat structure (name, description, parameters at top level)
+        elif "description" in tool_meta:
+            name = tool_meta.get("name", "unknown_tool")
+            description = tool_meta.get("description", "No description available")
+            parameters = tool_meta.get("parameters", [])
+        # Case 3: Tool has corrupted structure with raw function - skip it
+        elif "function" in tool_meta and callable(tool_meta["function"]):
+            logger.warning(f"Skipping tool with _id {tool_meta.get('_id')} - contains raw function instead of metadata")
+            return None
+        else:
+            # Fallback for unknown structure
+            logger.warning(f"Unknown tool structure for tool with _id {tool_meta.get('_id')}, using fallback")
+            name = "unknown_tool"
+            description = "Tool metadata corrupted"
+            parameters = []
+
         # Initialize the properties and required parameters
         props, req = {}, []
 
-        # Format the tool
-        for p in tool_meta["parameters"]:
-            # Convert 'float' type to 'number' for OpenAI API compatibility
-            param_type = p.get("type", "string")
-            if param_type == "float":
-                param_type = "number"
+        # Format the tool parameters
+        if isinstance(parameters, list):
+            for p in parameters:
+                if not isinstance(p, dict):
+                    continue
+                    
+                # Normalize the parameter type for OpenAI API compatibility
+                param_type = p.get("type", "string")
                 
-            props[p["name"]] = {
-                "type": param_type,
-                "description": p.get("description", "")
-            }
-            if p.get("required", False):
-                req.append(p["name"])
+                # Clean up type string - remove any extra text like "(required)"
+                if isinstance(param_type, str):
+                    param_type = param_type.lower().strip()
+                    # Remove any parenthetical content
+                    if "(" in param_type:
+                        param_type = param_type.split("(")[0].strip()
+                    
+                    # Normalize numeric types to 'number'
+                    if param_type in ["float", "decimal", "double", "numeric", "number"]:
+                        param_type = "number"
+                    elif param_type in ["int", "integer"]:
+                        param_type = "integer"
+                    elif param_type in ["bool", "boolean"]:
+                        param_type = "boolean"
+                    elif param_type in ["str", "text"]:
+                        param_type = "string"
+                    # Default to string if unrecognized
+                    elif param_type not in ["string", "number", "integer", "boolean", "array", "object"]:
+                        param_type = "string"
+                    
+                props[p["name"]] = {
+                    "type": param_type,
+                    "description": p.get("description", "")
+                }
+                if p.get("required", False):
+                    req.append(p["name"])
 
         # Return the formatted tool
         return {
             "type": "function",
-            "name": tool_meta["name"],
-            "description": tool_meta["description"],
+            "name": name,
+            "description": description,
             "parameters": {
                 "type": "object",
                 "properties": props,
@@ -189,9 +306,12 @@ class MemAgent:
         
         for t in tools:
             formatted_tool = self._format_tool(t)
-            # Preserve the tool_id for reference
-            if "tool_id" in t:
-                formatted_tool["tool_id"] = t["tool_id"]
+            # Skip tools that couldn't be formatted (corrupted metadata)
+            if formatted_tool is None:
+                continue
+            # Preserve the _id for reference (convert ObjectId to string for JSON serialization)
+            if "_id" in t:
+                formatted_tool["_id"] = str(t["_id"])
             formatted_tools.append(formatted_tool)
             
         return formatted_tools
@@ -208,30 +328,72 @@ class MemAgent:
         if isinstance(self.tools, list):
             formatted_tools = []
             for tool in self.tools:
+                # Handle different tool metadata structures
+                # Case 1: Tool has proper 'function' metadata structure
+                if "function" in tool and isinstance(tool["function"], dict):
+                    function_data = tool["function"]
+                    name = function_data.get("name", "unknown_tool")
+                    description = function_data.get("description", "No description available")
+                    parameters = function_data.get("parameters", [])
+                # Case 2: Tool has flat structure (name, description, parameters at top level)
+                elif "name" in tool:
+                    name = tool.get("name", "unknown_tool")
+                    description = tool.get("description", "No description available")
+                    parameters = tool.get("parameters", [])
+                # Case 3: Tool has corrupted structure - skip it
+                else:
+                    logger.warning(f"Skipping tool with _id {tool.get('_id')} - missing name and function structure")
+                    continue
+
                 # Create a properly formatted copy of the tool
                 formatted_tool = {
                     "type": "function",
-                    "name": tool["name"],
-                    "description": tool["description"]
+                    "name": name,
+                    "description": description
                 }
                 
                 # Format parameters according to OpenAI's function calling format
-                if "parameters" in tool and isinstance(tool["parameters"], list):
+                if isinstance(parameters, list) and len(parameters) > 0:
                     properties = {}
                     required = []
                     
-                    for param in tool["parameters"]:
-                        # Convert 'float' type to 'number' for OpenAI API compatibility
-                        param_type = param.get("type", "string")
-                        if param_type == "float":
-                            param_type = "number"
+                    for param in parameters:
+                        if not isinstance(param, dict):
+                            continue
                             
-                        properties[param["name"]] = {
+                        param_name = param.get("name")
+                        if not param_name:
+                            continue
+                            
+                        # Normalize the parameter type for OpenAI API compatibility
+                        param_type = param.get("type", "string")
+                        
+                        # Clean up type string - remove any extra text like "(required)"
+                        if isinstance(param_type, str):
+                            param_type = param_type.lower().strip()
+                            # Remove any parenthetical content
+                            if "(" in param_type:
+                                param_type = param_type.split("(")[0].strip()
+                            
+                            # Normalize numeric types to 'number'
+                            if param_type in ["float", "decimal", "double", "numeric", "number"]:
+                                param_type = "number"
+                            elif param_type in ["int", "integer"]:
+                                param_type = "integer"
+                            elif param_type in ["bool", "boolean"]:
+                                param_type = "boolean"
+                            elif param_type in ["str", "text"]:
+                                param_type = "string"
+                            # Default to string if unrecognized
+                            elif param_type not in ["string", "number", "integer", "boolean", "array", "object"]:
+                                param_type = "string"
+                            
+                        properties[param_name] = {
                             "type": param_type,
                             "description": param.get("description", "")
                         }
                         if param.get("required", False):
-                            required.append(param["name"])
+                            required.append(param_name)
                     
                     formatted_tool["parameters"] = {
                         "type": "object",
@@ -239,12 +401,16 @@ class MemAgent:
                         "required": required
                     }
                 else:
-                    # If parameters is already in the correct format, keep it
-                    formatted_tool["parameters"] = tool.get("parameters", {"type": "object", "properties": {}})
+                    # If no parameters or parameters is already in the correct format, provide empty schema
+                    formatted_tool["parameters"] = {
+                        "type": "object", 
+                        "properties": {},
+                        "required": []
+                    }
                 
-                # Preserve tool_id for reference
-                if "tool_id" in tool:
-                    formatted_tool["tool_id"] = tool["tool_id"]
+                # Preserve _id for reference (convert ObjectId to string for JSON serialization)
+                if "_id" in tool:
+                    formatted_tool["_id"] = str(tool["_id"])
                 
                 formatted_tools.append(formatted_tool)
             
@@ -259,17 +425,21 @@ class MemAgent:
         execute any function_call, loop until final text answer.
         """
 
+        # TODO: Remove this once we have a way to pass the model to the agent
+        # TODO: Below needs to be configured globally and not per agent
+        self.model = OpenAI(model="gpt-4.1")
+
         # 1) Ensure memory_id
         if memory_id is None:
             if self.memory_ids and len(self.memory_ids) > 0:
                 # Use the most recent memory_id if none specified
                 memory_id = self.memory_ids[-1]
             else:
-                # Create a new memory_id if none exist
-                memory_id = str(uuid.uuid4())
+                # Create a new memory_id if none exist using MongoDB ObjectId
+                memory_id = str(ObjectId())
         elif memory_id not in (self.memory_ids or []):
-            # Create a new memory_id if specified one doesn't exist
-            memory_id = str(uuid.uuid4())
+            # Create a new memory_id if specified one doesn't exist using MongoDB ObjectId
+            memory_id = str(ObjectId())
 
         # persist to agent if needed
         if self.agent_id and memory_id not in (self.memory_ids or []):
@@ -279,30 +449,116 @@ class MemAgent:
 
         # 2) Ensure conversation_id
         if conversation_id is None:
-            conversation_id = str(uuid.uuid4())
+            # Use MongoDB ObjectId for better performance
+            conversation_id = str(ObjectId())
 
-        # 3) Build system + user prompt
-        system_prompt = self._generate_system_prompt()
+        # 3) Augment the user query with the query
         augmented_query = f"This is the query to be answered or key objective to be achieved: {query}"
 
-        # 4) Append past conversation history
+        # Get the prompt for the memory types
+        # TODO: Need to get the memory types the agent is using or infer from the memory_mode
+        memory_types = [MemoryType.WORKFLOW_MEMORY, MemoryType.CONVERSATION_MEMORY, MemoryType.PERSONAS]
+        cwm_prompt = CWM.get_prompt_from_memory_types(memory_types)
+
+        augmented_query += f"\n\n{cwm_prompt}"
+
+        # 4) Load and integrate workflow memory
+        if self.memory_mode in (MemoryMode.Workflow): #MemoryMode.Default is not used here because it is not a valid memory mode
+            try:
+                # Retrieve relevant workflows based on the query
+                relevant_workflows = Workflow.retrieve_workflows_by_query(query, self.memory_provider)
+                
+                if relevant_workflows and len(relevant_workflows) > 0:
+                    workflow_context = "\n\n---------THIS IS YOUR WORFLOW MEMORY---------\n"
+                    workflow_context += "\n\nPrevious workflow executions that may be relevant to ensure you are on the right track, use this information to guide your execution:\n"
+                    for workflow in relevant_workflows:
+                        # Add workflow details including outcome to guide execution
+                        workflow_context += f"- Workflow '{workflow.name}': {workflow.description}\n"
+                        workflow_context += f"  Outcome: {workflow.outcome.value}\n"
+                        if workflow.outcome == WorkflowOutcome.FAILURE:
+                            workflow_context += f"  Error: {workflow.steps.get('error', 'Unknown error')}\n"
+                        
+                        # Add detailed step information
+                        workflow_context += f"  Steps taken: {len(workflow.steps)}\n"
+                        for step_name, step_data in workflow.steps.items():
+                            workflow_context += f"    Step: {step_name}\n"
+                            workflow_context += f"      Function: {step_data.get('_id', 'Unknown')}\n"
+                            workflow_context += f"      Arguments: {step_data.get('arguments', {})}\n"
+                            workflow_context += f"      Result: {step_data.get('result', 'No result')}\n"
+                            if step_data.get('error'):
+                                workflow_context += f"      Error: {step_data.get('error')}\n"
+                            workflow_context += f"      Timestamp: {step_data.get('timestamp', 'Unknown')}\n"
+                        workflow_context += "\n"
+                    
+                    augmented_query += workflow_context
+
+            except Exception as e:
+                logger.error(f"Error loading workflow memory: {str(e)}")
+                # Continue execution even if workflow memory loading fails
+
+        # 5) Build system + user prompt
+        system_prompt = self._generate_system_prompt()
+
+        # Write a conversational history prompt
+        conversational_history_prompt = "---------THIS IS YOUR CONVERSATIONAL HISTORY MEMORY---------\n"
+        conversational_history_prompt += "\n\nPrevious conversations that may be relevant to ensure you are on the right track, use this information to guide your execution:\n"
+        augmented_query += conversational_history_prompt
+
+        # 6) Append past conversation history
         for conv in self.load_conversation_history(memory_id):
             augmented_query += (
-                f"\n\nPrevious: {conv['role']}: {conv['content']}. "
-                "Use this context to answer coherently."
+                f"\n\n{conv['role']}: {conv['content']}. "
             )
 
-        # 5) Append relevant memory components
+        # Write relevant memory components prompt
+        relevant_memory_components_prompt = "---------THIS IS YOUR RELEVANT MEMORY COMPONENTS---------\n"
+        relevant_memory_components_prompt += "\n\nRelevant memory components that may be relevant to ensure you are on the right track, use this information to guide your execution:\n"
+        augmented_query += relevant_memory_components_prompt
+
+        # 7) Append relevant memory components
         if self.memory_mode in (MemoryMode.Conversational, MemoryMode.Default):
             for mem in self._load_relevant_memory_components(
                 query, MemoryType.CONVERSATION_MEMORY, memory_id, limit=5
             ):
                 augmented_query += (
-                    f"\n\nRelevant memory: {mem['role']}: {mem['content']}. "
-                    "Use this to inform your answer."
+                    f"\n\n{mem['role']}: {mem['content']}. "
                 )
 
-        # 6) Record the user's turn in memory
+        # Add long-term knowledge to the prompt if agent has long_term_memory_ids
+        if hasattr(self, "long_term_memory_ids") and self.long_term_memory_ids:
+            # Write long term memory prompt
+            long_term_memory_prompt = "---------THIS IS YOUR LONG-TERM KNOWLEDGE---------\n"
+            long_term_memory_prompt += "\n\nRelevant knowledge from your long-term memory that may help answer the query:\n"
+            augmented_query += long_term_memory_prompt
+            
+            # Import knowledge base and load relevant knowledge
+            kb = KnowledgeBase(self.memory_provider)
+            
+            # First, try to retrieve knowledge semantically similar to the query
+            semantic_entries = kb.retrieve_knowledge_by_query(query, limit=3)
+            
+            # Add semantic matches first
+            if semantic_entries:
+                augmented_query += "\n\n--- Semantically Relevant Knowledge ---\n"
+                for entry in semantic_entries:
+                    augmented_query += f"\n\nKnowledge: {entry.get('content', '')}\n"
+                    augmented_query += f"Namespace: {entry.get('namespace', 'general')}\n"
+            
+            # For each memory ID, retrieve and add relevant knowledge
+            augmented_query += "\n\n--- Agent's Associated Knowledge ---\n"
+            for memory_id in self.long_term_memory_ids:
+                knowledge_entries = kb.retrieve_knowledge(memory_id)
+                for entry in knowledge_entries:
+                    # Skip entries already included in semantic search
+                    if entry in semantic_entries:
+                        continue
+                    augmented_query += f"\n\nKnowledge: {entry.get('content', '')}\n"
+                    augmented_query += f"Namespace: {entry.get('namespace', 'general')}\n"
+        
+        # Reinforce the user query and the objective to end the prompt construction
+        augmented_query += f"\n\nRemember the user query to address and objective is: {query}"
+
+        # 8) Record the user's turn in memory
         if self.memory_mode in (MemoryMode.Conversational, MemoryMode.Default):
             self._generate_conversational_memory_component({
                 "role": Role.User,
@@ -312,21 +568,36 @@ class MemAgent:
                 "memory_id": memory_id,
             })
 
-        # 7) Seed the chat
+        # 9) Seed the chat
         messages = [
-            {"role": "system",    "content": system_prompt},
-            {"role": "user",      "content": augmented_query},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": augmented_query},
         ]
+
         tool_choice = "auto"
 
-        # 8) Main loop
+        # Export system prompt to file
+        with open("monitoring_system_prompt.txt", "w") as f:
+            f.write(system_prompt)
+
+        # Export augmented query to file
+        with open("monitoring_augmented_query.txt", "w") as f:
+            f.write(augmented_query)
+
+        # 10) Main loop
         for _ in range(self.max_steps):
             # a) Build function schema list
             if self.tools:
-                if isinstance(self.tools, Toolbox) and self.tool_access != "global":
-                    tool_metas = self._load_tools_from_memagent()
-                elif isinstance(self.tools, Toolbox):
-                    tool_metas = self._load_tools_from_toolbox(query)
+                if isinstance(self.tools, Toolbox):
+                    if self.tool_access == "global":
+                        tool_metas = self._load_tools_from_toolbox(query)
+                    else:
+                        # For private access, convert Toolbox tools to the expected format
+                        tool_metas = []
+                        for tool_meta in self.tools.list_tools():
+                            formatted_tool = self._format_tool(tool_meta)
+                            if formatted_tool is not None:
+                                tool_metas.append(formatted_tool)
                 else:
                     tool_metas = self._load_tools_from_memagent()
                 if not tool_metas:
@@ -349,72 +620,107 @@ class MemAgent:
             ]
 
             if tool_calls:
-                call = tool_calls[0]
-                name = call.name
-                try:
-                    args = json.loads(call.arguments)
+                # Create a workflow to track all tool calls
+                workflow = Workflow(
+                    name=f"Tool Execution: {len(tool_calls)} steps",
+                    description=f"Execution of {len(tool_calls)} tools",
+                    memory_id=memory_id,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                    outcome=WorkflowOutcome.SUCCESS,
+                    user_query=query
+                )
+
+                for call in tool_calls:
+                    name = call.name
+                    error_message = None  # Initialize error message for this tool call
+                    try:
+                        args = json.loads(call.arguments)
+                        messages.append({
+                            "type":      "function_call",
+                            "call_id":   call.call_id,
+                            "name":      call.name,
+                            "arguments": call.arguments,
+                        })
+                    except Exception:
+                        args = {}
+
+                    # d) Lookup the Python function backing this call
+                    fn = None
+                    entry = None
+                    if isinstance(self.tools, Toolbox):
+                        # For Toolbox, search in the formatted tools we just created
+                        for meta in tool_metas:
+                            if meta["name"] == name:
+                                entry = meta
+                                # Use the Toolbox's get_function_by_id method
+                                fn = self.tools.get_function_by_id(str(meta.get("_id")))
+                                break
+                    elif isinstance(self.tools, list):
+                        formatted = self._load_tools_from_memagent()
+                        for t in formatted:
+                            if t["name"] == name:
+                                entry = t
+                                for orig in self.tools:
+                                    # Handle different tool structures
+                                    orig_name = None
+                                    if "name" in orig:
+                                        orig_name = orig["name"]
+                                    elif "function" in orig and isinstance(orig["function"], dict):
+                                        orig_name = orig["function"].get("name")
+                                    
+                                    if orig_name == name:
+                                        fn = getattr(self, "_tool_functions", {}).get(str(orig.get("_id")))
+                                        break
+                                break
+
+                    if not entry:
+                        result = f"Error: Tool '{name}' not found in available tools."
+                        error_message = result
+                        workflow_outcome = WorkflowOutcome.FAILURE
+                    elif not callable(fn):
+                        logger.warning(f"Tool '{name}' found but function is not callable. Tool ID: {entry.get('_id')}")
+                        result = f"Sorry, the tool '{name}' is currently unavailable. It exists in the system but its implementation function is not properly registered."
+                        error_message = result
+                        workflow_outcome = WorkflowOutcome.FAILURE
+                    else:
+                        try:
+                            # e) Execute and append the function's result
+                            result = fn(**args)
+                            workflow_outcome = WorkflowOutcome.SUCCESS
+                        except Exception as e:
+                            logger.error(f"Error executing tool {name}: {str(e)}")
+                            result = f"Error executing tool {name}: {str(e)}"
+                            error_message = str(e)
+                            workflow_outcome = WorkflowOutcome.FAILURE
+
+                    # Append the result (either actual function output or error message)
                     messages.append({
-                        "type":      "function_call",
-                        "call_id":   call.call_id,
-                        "name":      call.name,
-                        "arguments": call.arguments,
+                        "type":    "function_call_output",
+                        "call_id": call.call_id,
+                        "output":  str(result),
                     })
-                except Exception:
-                    args = {}
 
-                # d) Lookup the Python function backing this call
-                fn = None
-                entry = None
-                if isinstance(self.tools, Toolbox):
-                    for meta in (self._load_tools_from_toolbox(query) if self.tool_access=="global"
-                                else self._load_tools_from_memagent()):
-                        if meta["name"] == name:
-                            entry = meta
-                            fn = getattr(self, "_tool_functions", {}).get(meta.get("tool_id"))
-                            break
-                elif isinstance(self.tools, list):
-                    formatted = self._load_tools_from_memagent()
-                    for t in formatted:
-                        if t["name"] == name:
-                            entry = t
-                            for orig in self.tools:
-                                if orig["name"] == name:
-                                    fn = getattr(self, "_tool_functions", {}).get(orig.get("tool_id"))
-                                    break
-                            break
+                    # Add step to workflow
+                    workflow.add_step(f"Step {len(workflow.steps) + 1}: {name}", {
+                        "_id": str(entry.get("_id")) if entry else None,
+                        "arguments": args,
+                        "result": result,
+                        "timestamp": datetime.now().isoformat(),
+                        "error": error_message
+                    })
 
-                if not entry:
-                    result = f"Error: Tool '{name}' not found in available tools."
-                elif not callable(fn):
-                    logger.warning(f"Tool '{name}' found but function is not callable. Tool ID: {entry.get('tool_id')}")
-                    result = f"Sorry, the tool '{name}' is currently unavailable. It exists in the system but its implementation function is not properly registered."
-                else:
-                    # e) Execute and append the function's result
-                    result = fn(**args)
+                    # Update workflow outcome if any step failed
+                    if workflow_outcome == WorkflowOutcome.FAILURE:
+                        workflow.outcome = WorkflowOutcome.FAILURE
 
-                # Append the result (either actual function output or error message)
-                messages.append({
-                    "type":    "function_call_output",
-                    "call_id": call.call_id,
-                    "output":  str(result),  # Convert result to string to ensure compatibility
-                })
-
-                # f) Record into memory
-                # TODO: This is an area to store workflow memory (e.g. tool calls, tool call outputs, etc.)
-                # Commenting out for now as we don't have a workflow memory component yet
-                # self._generate_conversational_memory_component({
-                #     "role": Role.Tool,
-                #     "tool_call_id": call.call_id,
-                #     "tool_id": entry.get("tool_id"),
-                #     "name": name,
-                #     "content": result,
-                #     "memory_id": memory_id,
-                #     "conversation_id": conversation_id,
-                #     "timestamp": datetime.now().isoformat(),
-                # })
-
-                # g) Loop back so model ingests the tool output
-                continue
+                # Store the complete workflow with all steps
+                if self.memory_mode in (MemoryMode.Workflow, MemoryMode.Default):
+                    try:
+                        workflow.store_workflow(self.memory_provider)
+                    except Exception as e:
+                        logger.error(f"Error storing workflow: {str(e)}")
+                        # Continue execution even if workflow storage fails
 
             # h) No function calls → final answer
             if response.output_text:
@@ -435,7 +741,7 @@ class MemAgent:
                 })
                 return response.output_text
 
-        # 9) If we never returned…
+        # 11) If we never returned…
         raise RuntimeError("Max steps exceeded without reaching a final answer.")
 
 
@@ -507,56 +813,61 @@ class MemAgent:
 
         This method stores the memagent in the memory provider.
         """
-        if self.agent_id is None:
-            self.agent_id = str(uuid.uuid4())
-
+        # Convert tools to serializable format if it's a Toolbox object
+        tools_to_save = self.tools
+        if isinstance(self.tools, Toolbox):
+            # Convert Toolbox to list of tool metadata for serialization
+            tools_to_save = []
+            for tool_meta in self.tools.list_tools():
+                # Check if 'function' field contains metadata (dict) or raw function (callable)
+                function_field = tool_meta.get("function", {})
+                
+                if callable(function_field):
+                    # If it's a raw function, skip this tool as it's improperly stored
+                    logger.warning(f"Skipping tool with _id {tool_meta.get('_id')} - contains raw function instead of metadata")
+                    continue
+                elif isinstance(function_field, dict):
+                    # If it's proper metadata, extract serializable tool information
+                    serializable_tool = {
+                        "_id": tool_meta.get("_id"),
+                        "function": {
+                            "name": function_field.get("name"),
+                            "description": function_field.get("description"),
+                            "parameters": function_field.get("parameters", [])
+                        },
+                        "type": tool_meta.get("type", "function")
+                    }
+                    tools_to_save.append(serializable_tool)
+                else:
+                    # If it's neither dict nor callable, skip with warning
+                    logger.warning(f"Skipping tool with _id {tool_meta.get('_id')} - unknown function field type: {type(function_field)}")
+                    continue
+        
         # Create a new MemAgentModel with the current object's attributes
         memagent_to_save = MemAgentModel(
             instruction=self.instruction,
             memory_mode=self.memory_mode,
             max_steps=self.max_steps,
             memory_ids=self.memory_ids,
-            agent_id=self.agent_id,
+            agent_id=self.agent_id,  # This will be removed in the provider
             persona=self.persona,
-            tools=self.tools
+            tools=tools_to_save,
+            long_term_memory_ids=getattr(self, "long_term_memory_ids", None)
         )
 
         # Store the memagent in the memory provider
         saved_memagent = self.memory_provider.store_memagent(memagent_to_save)
 
-        # Create a new MemAgentModel with the current object's attributes
-        # and handle memory_mode conversion properly
-        memory_mode_value = self.memory_mode
-        if isinstance(memory_mode_value, str):
-            # Map the string to the corresponding MemoryMode attribute
-            if memory_mode_value == "general":
-                memory_mode_value = MemoryMode.General
-            elif memory_mode_value == "conversational":
-                memory_mode_value = MemoryMode.Conversational
-            elif memory_mode_value == "task":
-                memory_mode_value = MemoryMode.Task
-            elif memory_mode_value == "workflow":
-                memory_mode_value = MemoryMode.Workflow
-            else:
-                # Default to General if string doesn't match
-                memory_mode_value = MemoryMode.General
-
-        # Create a new MemAgent object with our current attributes
-        saved_memagent = MemAgentModel(
-            instruction=saved_memagent["instruction"],
-            memory_mode=memory_mode_value,
-            max_steps=saved_memagent["max_steps"],
-            memory_ids=saved_memagent["memory_ids"],
-            agent_id=saved_memagent["agent_id"],
-        )
+        # Update the agent_id to the MongoDB _id that was generated
+        self.agent_id = str(saved_memagent["_id"])
 
         # Log the saved memagent
         logger.info(f"Memagent {self.agent_id} saved in the memory provider")
         # Log the details and attributes of the saved memagent
         # Show the logs as a json object
-        logger.info(saved_memagent.model_dump_json(indent=4))
+        logger.info(json.dumps(saved_memagent, indent=4, default=str))
 
-        return saved_memagent
+        return self
 
 
     def update(self, 
@@ -602,6 +913,37 @@ class MemAgent:
         if memory_ids:
             self.memory_ids = memory_ids
 
+        # Convert tools to serializable format if it's a Toolbox object
+        tools_to_update = self.tools
+        if isinstance(self.tools, Toolbox):
+            # Convert Toolbox to list of tool metadata for serialization
+            tools_to_update = []
+            for tool_meta in self.tools.list_tools():
+                # Extract serializable tool information
+                # Check if 'function' field contains metadata (dict) or raw function (callable)
+                function_field = tool_meta.get("function", {})
+                
+                if callable(function_field):
+                    # If it's a raw function, skip this tool as it's improperly stored
+                    logger.warning(f"Skipping tool with _id {tool_meta.get('_id')} - contains raw function instead of metadata")
+                    continue
+                elif isinstance(function_field, dict):
+                    # If it's proper metadata, extract serializable tool information
+                    serializable_tool = {
+                        "_id": tool_meta.get("_id"),
+                        "function": {
+                            "name": function_field.get("name"),
+                            "description": function_field.get("description"),
+                            "parameters": function_field.get("parameters", [])
+                        },
+                        "type": tool_meta.get("type", "function")
+                    }
+                    tools_to_update.append(serializable_tool)
+                else:
+                    # If it's neither dict nor callable, skip with warning
+                    logger.warning(f"Skipping tool with _id {tool_meta.get('_id')} - unknown function field type: {type(function_field)}")
+                    continue
+
         memagent_to_update = MemAgentModel(
             instruction=self.instruction,
             memory_mode=self.memory_mode,
@@ -609,7 +951,7 @@ class MemAgent:
             memory_ids=self.memory_ids,
             agent_id=self.agent_id,
             persona=self.persona,
-            tools=self.tools
+            tools=tools_to_update
         )
 
         # Update the memagent in the memory provider
@@ -672,11 +1014,36 @@ class MemAgent:
             agent_id=agent_id,
             memory_provider=provider
         )
+        
+        # Set long_term_memory_ids if they exist
+        if hasattr(memagent, "long_term_memory_ids") and memagent.long_term_memory_ids:
+            memagent.long_term_memory_ids = memagent.long_term_memory_ids
 
         # Show the logs as a json object
         logger.info(f"MemAgent loaded with agent_id: {agent_id}")
 
         return memagent
+    
+    def refresh(self):
+        """
+        Refresh the memagent from the memory provider.
+
+        This method refreshes the memagent from the memory provider.
+
+        Returns:
+            MemAgent: The refreshed memagent.
+        """
+        try:
+            # Get a fresh copy of the memagent from the memory provider
+            memagent = self.memory_provider.retrieve_memagent(self.agent_id)
+
+            # Update the memagent with the fresh copy
+            self.__dict__.update(memagent.__dict__)
+
+            return self
+        except Exception as e:
+            logger.error(f"Error refreshing memagent {self.agent_id}: {e}")
+            return False
     
     @classmethod
     def _do_delete(cls, 
@@ -754,13 +1121,44 @@ class MemAgent:
 
         return type(self)._do_delete(self.agent_id, cascade, self.memory_provider)
     
-    # Memory ID Management
+    # Memory Management Methods
+
+    def download_memory(self, memagent: MemAgentModel):
+        """
+        Download the memory of the memagent.
+
+        This method downloads the memory of the memagent.
+        It takes in a memagent and then adds the memory_ids of the memagent to the memory_ids attribute of the memagent.
+        It then updates the memory_ids of the memagent in the memory provider.
+
+        Parameters:
+            memagent (MemAgent): The memagent to download the memory from.
+
+        Returns:
+            bool: True if the memory was downloaded successfully, False otherwise.
+        """
+
+        try:
+            # Add the list of the memory_ids to the memory_ids attribute of the memagent
+            self.memory_ids = self.memory_ids + memagent.memory_ids
+
+            # Update the memory_ids of the memagent in the memory provider
+            if hasattr(self.memory_provider, 'update_memagent_memory_ids'):
+                self.memory_provider.update_memagent_memory_ids(self.agent_id, self.memory_ids)
+            else:
+                raise ValueError("Memory provider does not have the update_memagent_memory_ids method.")
+            return True
+        except Exception as e:
+            logger.error(f"Error downloading memory from memagent {memagent.agent_id}: {e}")
+            return False
     
-    def update_memory_ids(self, memory_ids: List[str]):
+    def update_memory(self, memory_ids: List[str]):
         """
         Update the memory_ids of the memagent.
 
         This method updates the memory_ids of the memagent.
+        It takes in a list of memory_ids and then adds the list to the memory_ids attribute of the memagent.
+        It then updates the memory_ids of the memagent in the memory provider.
 
         Parameters:
             memory_ids (List[str]): The memory_ids to update.
@@ -768,37 +1166,48 @@ class MemAgent:
         Returns:
             bool: True if the memory_ids were updated successfully, False otherwise.
         """
-        self.memory_ids = memory_ids
 
-        if hasattr(self.memory_provider, 'update_memagent_memory_ids'):
-            # Update the memory_ids of the memagent in the memory provider
-            self.memory_provider.update_memagent_memory_ids(self.agent_id, self.memory_ids)
-        else:
-            raise ValueError("Memory provider does not have the update_memagent_memory_ids method.")
-        
-        return True
+        try:           
+
+            # Update the memory_ids of the memagent in the memory provider
+            if hasattr(self.memory_provider, 'update_memagent_memory_ids'):
+                 # Add the list of memory_ids to the memory_ids attribute of the memagent
+                memories_to_add = self.memory_ids + memory_ids
+                self.memory_provider.update_memagent_memory_ids(self.agent_id, memories_to_add)
+                
+                # Update the memory_ids of the memagent in the memagent
+                self.memory_ids = memories_to_add
+            else:
+                raise ValueError("Memory provider does not have the update_memagent_memory_ids method.")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error updating memory_ids of memagent {self.agent_id}: {e}")
+            return False
     
-    def delete_memory_ids(self, memory_ids: List[str]):
+    def delete_memory(self):
         """
         Delete the memory_ids of the memagent.
 
-        This method deletes the memory_ids of the memagent.
-
-        Parameters:
-            memory_ids (List[str]): The memory_ids to delete.
+        It deletes the memory_ids of the memagent in the memory provider.
 
         Returns:
             bool: True if the memory_ids were deleted successfully, False otherwise.
         """
-        self.memory_ids = [memory_id for memory_id in self.memory_ids if memory_id not in memory_ids]
 
-        if hasattr(self.memory_provider, 'delete_memagent_memory_ids'):
-            # Delete the memory_ids of the memagent in the memory provider
-            self.memory_provider.delete_memagent_memory_ids(self.agent_id)
-        else:
-            raise ValueError("Memory provider does not have the delete_memagent_memory_ids method.")
-        
-        return True
+        try:
+            if hasattr(self.memory_provider, 'delete_memagent_memory_ids'):
+                # Delete the memory_ids of the memagent in the memory provider
+                self.memory_provider.delete_memagent_memory_ids(self.agent_id)
+
+                # Delete the memory_ids of the memagent in the memagent
+                self.memory_ids = []
+                return True
+            else:
+                raise ValueError("Memory provider does not have the delete_memagent_memory_ids method.")
+        except Exception as e:
+            logger.error(f"Error deleting memory_ids of memagent {self.agent_id}: {e}")
+            return False
 
     # Persona Management
     
@@ -813,6 +1222,7 @@ class MemAgent:
         Returns:
             bool: True if the persona was set successfully, False otherwise.
         """
+        
         self.persona = persona
         if save:
             self.update()
@@ -828,7 +1238,12 @@ class MemAgent:
         Returns:
             bool: True if the persona was set successfully, False otherwise.
         """
-        self.persona = self.memory_provider.retrieve_persona(persona_id)
+
+        # Check if the memory provider has the retrieve_persona method
+        if hasattr(self.memory_provider, 'retrieve_persona'):
+            self.persona = self.memory_provider.retrieve_persona(persona_id)
+        else:
+            raise ValueError("Memory provider does not have the retrieve_persona method.")
 
         if self.persona:
             if save:
@@ -891,27 +1306,6 @@ class MemAgent:
         Returns:
             bool: True if the tool was added or updated successfully.
         """
-        def _build_entry(meta: dict, python_fn: Callable) -> dict:
-            """
-            Construct the flat OpenAI‐style schema entry and
-            register the python_fn in our internal lookup.
-            """
-            entry = {
-                "tool_id":    meta["tool_id"],
-                "name":       meta["function"]["name"],
-                "description":meta["function"]["description"],
-                "parameters": meta["function"]["parameters"],
-                # preserve strict‐mode flag if present:
-                **({"strict": meta.get("strict", True)}),
-            }
-            # keep a private map of tool_id → python function,
-            # but don't include it when serializing the agent's 'tools' list
-            self._tool_functions = getattr(self, "_tool_functions", {})
-            self._tool_functions[meta["tool_id"]] = python_fn
-
-            return entry
-
-        # --- single‐tool branch ---
         if tool_id:
             # 1) fetch the metadata from memory-provider
             meta = self.memory_provider.retrieve_by_id(tool_id, MemoryType.TOOLBOX)
@@ -922,11 +1316,12 @@ class MemAgent:
             if not isinstance(toolbox, Toolbox):
                 raise ValueError("Need a Toolbox instance to resolve the Python callable")
 
+            # Use _id (which is the same as tool_id now) for function lookup
             python_fn = toolbox._tools.get(tool_id)
             if not callable(python_fn):
                 # fallback: perhaps the stored metadata itself packs a .function field?
                 tb_meta = next(
-                    (m for m in toolbox.list_tools() if m.get("tool_id") == tool_id),
+                    (m for m in toolbox.list_tools() if str(m.get("_id")) == tool_id),
                     None
                 )
                 if tb_meta and callable(tb_meta.get("function")):
@@ -937,12 +1332,17 @@ class MemAgent:
                 return False
 
             # 3) build the new entry
-            new_entry = _build_entry(meta, python_fn)
+            new_entry = self._build_entry(meta, python_fn)
 
-            # 4) if already present in self.tools, overwrite in-place
+            # 4) Handle different types of self.tools (Toolbox vs list)
+            if isinstance(self.tools, Toolbox):
+                # If self.tools is a Toolbox, convert to list format for agent use
+                self.tools = []
+            
+            # Now self.tools should be a list (or None)
             existing_idx = None
             for idx, t in enumerate(self.tools or []):
-                if t.get("tool_id") == tool_id:
+                if str(t.get("_id")) == tool_id:
                     existing_idx = idx
                     break
 
@@ -955,21 +1355,67 @@ class MemAgent:
                 self.tools.append(new_entry)
 
             # 5) persist the agent's updated tools list
-            self.update()
+            self.update(tools=self.tools)
             return True
 
         # --- batch‐import branch ---
         if toolbox:
             if not isinstance(toolbox, Toolbox):
                 raise TypeError(f"Expected a Toolbox, got {type(toolbox)}")
-            success = False
+            
+            # If self.tools is already the same Toolbox, no need to re-add
+            if self.tools is toolbox:
+                return True
+                
+            # Use the shared initialization logic for better performance
+            # Convert existing tools to list format if needed
+            if isinstance(self.tools, Toolbox):
+                self.tools = []
+            
+            # Store current tools count to check if any were added
+            initial_count = len(self.tools or [])
+            
+            # Add all tools from the toolbox using shared logic
             for meta in toolbox.list_tools():
-                tid = meta.get("tool_id")
+                tid = str(meta.get("_id"))
                 if tid:
-                    # recursively leverage the single‐tool logic
-                    if self.add_tool(tool_id=tid, toolbox=toolbox):
-                        success = True
-            return success
+                    # Resolve the Python callable from the provided Toolbox
+                    python_fn = toolbox._tools.get(tid)
+                    if not callable(python_fn):
+                        # fallback: perhaps the stored metadata itself packs a .function field?
+                        if meta and callable(meta.get("function")):
+                            python_fn = meta["function"]
+
+                    if callable(python_fn):
+                        # Check if tool already exists to avoid duplicates
+                        existing_idx = None
+                        for idx, t in enumerate(self.tools or []):
+                            if str(t.get("_id")) == tid:
+                                existing_idx = idx
+                                break
+
+                        # build the new entry
+                        new_entry = self._build_entry(meta, python_fn)
+                        
+                        if existing_idx is not None:
+                            # replace the old entry
+                            self.tools[existing_idx] = new_entry
+                        else:
+                            # append a brand-new entry
+                            self.tools = self.tools or []
+                            self.tools.append(new_entry)
+                    else:
+                        # Silently skip tools without functions
+                        logger.warning(f"Skipping tool with _id {tid} - no callable function found")
+                        continue
+            
+            # Save the updated tools if any were added
+            final_count = len(self.tools or [])
+            if final_count > initial_count:
+                self.update(tools=self.tools)
+                return True
+            
+            return final_count > 0  # Return True if we have tools, even if none were newly added
 
         # --- neither provided: error ---
         raise ValueError("Must supply either a tool_id or a Toolbox instance.")
@@ -985,7 +1431,7 @@ class MemAgent:
         # If tools is set and not empty, export the tools to the toolbox within the memory provider
         if self.tools and len(self.tools) > 0:
             for tool in self.tools:
-                if tool.get("tool_id") is None:
+                if tool.get("_id") is None:
                     # Export the tool to the toolbox within the memory provider
                     new_tool_id = self.memory_provider.store(tool, MemoryType.TOOLBOX)
                     self.tools.append({"tool_id": new_tool_id, **tool})
@@ -1028,19 +1474,143 @@ class MemAgent:
         This method deletes a tool from the memagent.
 
         Parameters:
-            tool_id (str): The tool id.
+            tool_id (str): The tool id (_id).
 
         Returns:
             bool: True if the tool was deleted successfully, False otherwise.
         """
         if self.tools:
-            self.tools = [tool for tool in self.tools if tool["tool_id"] != tool_id]
+            self.tools = [tool for tool in self.tools if str(tool.get("_id")) != tool_id]
             self.save()
         else:
             raise ValueError("No tools to delete. Please add a tool to the memagent before deleting it.")
 
     def __str__(self):
+        """
+        Return a string representation of the memagent.
+        """
+
+        # Get a fresh copy of the memagent from the memory provider
+        self.refresh()
+
         return f"MemAgent(agent_id={self.agent_id}, memory_ids={self.memory_ids}, memory_mode={self.memory_mode}, max_steps={self.max_steps}, instruction={self.instruction}, model={self.model}, tools={self.tools}, persona={self.persona})"
     
     def __repr__(self):
-        return self.__str__()
+        """
+        Return a string representation of the memagent that can be used to recreate the object.
+        """
+        return f"MemAgent(agent_id={self.agent_id}, memory_provider={self.memory_provider})"
+
+    # Long-term Memory Management
+    
+    def add_long_term_memory(self, corpus: str, namespace: str = "general") -> Optional[str]:
+        """
+        Add long-term memory to the agent.
+        
+        Parameters:
+            corpus (str): The text content to store in long-term memory.
+            namespace (str): A namespace to categorize the knowledge.
+            
+        Returns:
+            Optional[str]: The ID of the created long-term memory, or None if unsuccessful.
+        """
+        try:
+            kb = KnowledgeBase(self.memory_provider)
+            
+            # Ingest the knowledge
+            long_term_memory_id = kb.ingest_knowledge(corpus, namespace)
+            
+            # Initialize the long_term_memory_ids attribute if it doesn't exist
+            if not hasattr(self, "long_term_memory_ids"):
+                self.long_term_memory_ids = []
+                
+            # Add the ID to the agent's long-term memory IDs
+            self.long_term_memory_ids.append(long_term_memory_id)
+            
+            # Save the updated agent
+            self.save()
+            
+            return long_term_memory_id
+        except Exception as e:
+            logger.error(f"Error adding long-term memory to agent {self.agent_id}: {e}")
+            return None
+    
+    def retrieve_long_term_memory(self, long_term_memory_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Retrieve long-term memory associated with the agent.
+        
+        Parameters:
+            long_term_memory_id (Optional[str]): The ID of a specific long-term memory to retrieve.
+                                                If None, retrieves all long-term memories associated with the agent.
+                                                
+        Returns:
+            List[Dict[str, Any]]: List of knowledge entries.
+        """
+        try:
+            kb = KnowledgeBase(self.memory_provider)
+            
+            # Initialize result list
+            all_entries = []
+            
+            # If a specific ID is provided, retrieve just that one
+            if long_term_memory_id:
+                return kb.retrieve_knowledge(long_term_memory_id)
+                
+            # Otherwise, retrieve all long-term memories associated with the agent
+            if hasattr(self, "long_term_memory_ids") and self.long_term_memory_ids:
+                for memory_id in self.long_term_memory_ids:
+                    entries = kb.retrieve_knowledge(memory_id)
+                    all_entries.extend(entries)
+                    
+            return all_entries
+        except Exception as e:
+            logger.error(f"Error retrieving long-term memory for agent {self.agent_id}: {e}")
+            return []
+    
+    def delete_long_term_memory(self, long_term_memory_id: str) -> bool:
+        """
+        Delete a specific long-term memory and remove it from the agent.
+        
+        Parameters:
+            long_term_memory_id (str): The ID of the long-term memory to delete.
+            
+        Returns:
+            bool: True if deletion was successful, False otherwise.
+        """
+        try:
+            # Remove the ID from the agent's list
+            if hasattr(self, "long_term_memory_ids") and self.long_term_memory_ids:
+                if long_term_memory_id in self.long_term_memory_ids:
+                    self.long_term_memory_ids.remove(long_term_memory_id)
+                    self.update()
+            
+            # Delete the knowledge from the memory provider
+            kb = KnowledgeBase(self.memory_provider)
+            return kb.delete_knowledge(long_term_memory_id)
+        except Exception as e:
+            logger.error(f"Error deleting long-term memory {long_term_memory_id}: {e}")
+            return False
+    
+    def update_long_term_memory(self, long_term_memory_id: str, corpus: str) -> bool:
+        """
+        Update the content of a specific long-term memory.
+        
+        Parameters:
+            long_term_memory_id (str): The ID of the long-term memory to update.
+            corpus (str): The new text content.
+            
+        Returns:
+            bool: True if update was successful, False otherwise.
+        """
+        try:
+            # Check if this memory is associated with the agent
+            if not hasattr(self, "long_term_memory_ids") or long_term_memory_id not in self.long_term_memory_ids:
+                logger.warning(f"Long-term memory {long_term_memory_id} is not associated with agent {self.agent_id}")
+                return False
+            
+            # Update the knowledge
+            kb = KnowledgeBase(self.memory_provider)
+            return kb.update_knowledge(long_term_memory_id, corpus)
+        except Exception as e:
+            logger.error(f"Error updating long-term memory {long_term_memory_id}: {e}")
+            return False
