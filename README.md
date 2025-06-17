@@ -79,6 +79,7 @@ print(response)  # Agent remembers John is a software engineer
 
 ```python
 from memorizz.persona import Persona
+from memorizz.persona import Persona
 
 # Create a technical expert persona
 tech_expert = Persona(
