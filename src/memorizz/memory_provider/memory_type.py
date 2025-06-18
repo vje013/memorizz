@@ -9,4 +9,5 @@ class MemoryType(Enum):
     CONVERSATION_MEMORY = "conversation_memory"
     WORKFLOW_MEMORY = "workflow_memory"
     MEMAGENT = "agents"
+    SHARED_MEMORY = "shared_memory"
 

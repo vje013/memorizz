@@ -63,6 +63,7 @@ class MongoDBProvider(MemoryProvider):
         self.conversation_memory_collection = self.db[MemoryType.CONVERSATION_MEMORY.value]
         self.workflow_memory_collection = self.db[MemoryType.WORKFLOW_MEMORY.value]
         self.memagent_collection = self.db[MemoryType.MEMAGENT.value]
+        self.shared_memory_collection = self.db[MemoryType.SHARED_MEMORY.value]
 
         # Create all memory stores in MongoDB.
         self._create_memory_stores()
@@ -81,6 +82,7 @@ class MongoDBProvider(MemoryProvider):
         self._create_memory_store(MemoryType.LONG_TERM_MEMORY)
         self._create_memory_store(MemoryType.CONVERSATION_MEMORY)
         self._create_memory_store(MemoryType.WORKFLOW_MEMORY)
+        self._create_memory_store(MemoryType.SHARED_MEMORY)
     
     def _create_memory_store(self, memory_store_type: MemoryType) -> None:
         """
@@ -164,6 +166,8 @@ class MongoDBProvider(MemoryProvider):
             collection = self.long_term_memory_collection
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             collection = self.conversation_memory_collection
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            collection = self.shared_memory_collection
 
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
@@ -251,7 +255,8 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection
         }
         
         collection = collection_mapping.get(memory_store_type)

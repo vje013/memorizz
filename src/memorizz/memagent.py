@@ -37,6 +37,7 @@ class MemAgentModel(BaseModel):
     memory_ids: Optional[List[str]] = None
     tool_access: Optional[str] = "private"
     long_term_memory_ids: Optional[List[str]] = None
+    delegates: Optional[List[str]] = None  # Store delegate agent IDs
     
     model_config = {
         "arbitrary_types_allowed": True  # Allow arbitrary types like Toolbox
@@ -55,7 +56,8 @@ class MemAgent:
         memory_provider: Optional[MemoryProvider] = None, # Memory provider of the agent
         memory_ids: Optional[Union[str, List[str]]] = None, # Memory id(s) of the agent
         agent_id: Optional[str] = None, # Agent id of the agent
-        tool_access: Optional[str] = "private" # Tool access of the agent
+        tool_access: Optional[str] = "private", # Tool access of the agent
+        delegates: Optional[List['MemAgent']] = None # Delegate agents for multi-agent mode
     ):
         # If the memory provider is not provided, then we use the default memory provider
         self.memory_provider = memory_provider or MemoryProvider()
@@ -67,6 +69,11 @@ class MemAgent:
         # TODO: Remove this once we have a way to pass the model to the agent
         # TODO: Below needs to be configured globally and not per agent
         self.model = OpenAI(model="gpt-4.1")
+        
+        # Multi-agent setup
+        self.delegates = delegates or []
+        self.is_multi_agent_mode = len(self.delegates) > 0
+        self._multi_agent_orchestrator = None
         
         # If the memory provider is provided and the agent id is provided, then we load the memagent from the memory provider
         if memory_provider and agent_id:
@@ -81,6 +88,18 @@ class MemAgent:
                     # If the model is not provided, then we use the default model
                     if loaded_agent.model is None:
                         self.model = OpenAI(model="gpt-4.1")
+                    
+                    # Load delegate agents if they exist
+                    if hasattr(loaded_agent, 'delegates') and loaded_agent.delegates:
+                        self.delegates = []
+                        for delegate_id in loaded_agent.delegates:
+                            try:
+                                delegate_agent = MemAgent.load(delegate_id, memory_provider)
+                                self.delegates.append(delegate_agent)
+                            except Exception as e:
+                                logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
+                        self.is_multi_agent_mode = len(self.delegates) > 0
+                    
                     return
                 else:
                     print(f"No agent found with id {agent_id}, creating a new one")
@@ -109,6 +128,32 @@ class MemAgent:
         # If tools is a Toolbox, properly initialize it using the same logic as add_tool
         if isinstance(tools, Toolbox):
             self._initialize_tools_from_toolbox(tools)
+
+    def _initialize_multi_agent_orchestrator(self):
+        """Initialize the multi-agent orchestrator if in multi-agent mode."""
+        if self.is_multi_agent_mode and not self._multi_agent_orchestrator:
+            # Import here to avoid circular imports
+            from .multi_agent_orchestrator import MultiAgentOrchestrator
+            self._multi_agent_orchestrator = MultiAgentOrchestrator(self, self.delegates)
+
+    def _check_for_shared_memory_context(self) -> str:
+        """Check if this agent is part of a shared memory session and return context."""
+        try:
+            # Import here to avoid circular imports
+            from .shared_memory import SharedMemory
+            
+            shared_memory = SharedMemory(self.memory_provider)
+            
+            # TODO This would need to be implemented in the memory provider
+            # For now, we'll check if there's an active session where this agent is the root
+            # session = shared_memory.get_session_by_root_agent(self.agent_id)
+            # if session:
+            #     return shared_memory.get_blackboard_entries(session["session_id"])
+            
+            return ""
+        except Exception as e:
+            logger.error(f"Error checking shared memory context: {e}")
+            return ""
 
     def _initialize_tools_from_toolbox(self, toolbox: Toolbox):
         """
@@ -423,7 +468,16 @@ class MemAgent:
         """
         Run the agent: load history & memory, call LLM with optional functions,
         execute any function_call, loop until final text answer.
+        
+        If in multi-agent mode, orchestrate task decomposition and delegation.
         """
+        
+        # Check if we're in multi-agent mode
+        if self.is_multi_agent_mode:
+            self._initialize_multi_agent_orchestrator()
+            return self._multi_agent_orchestrator.execute_multi_agent_workflow(
+                query, memory_id, conversation_id
+            )
 
         # TODO: Remove this once we have a way to pass the model to the agent
         # TODO: Below needs to be configured globally and not per agent
@@ -461,6 +515,11 @@ class MemAgent:
         cwm_prompt = CWM.get_prompt_from_memory_types(memory_types)
 
         augmented_query += f"\n\n{cwm_prompt}"
+
+        # Check for shared memory context (multi-agent coordination)
+        shared_memory_context = self._check_for_shared_memory_context()
+        if shared_memory_context:
+            augmented_query += shared_memory_context
 
         # 4) Load and integrate workflow memory
         if self.memory_mode in (MemoryMode.Workflow): #MemoryMode.Default is not used here because it is not a valid memory mode
