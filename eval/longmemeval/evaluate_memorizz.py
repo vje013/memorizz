@@ -24,7 +24,6 @@ sys.path.insert(0, str(project_root))
 # Place in environment variables
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["MONGODB_URI"] = ""
-
 try:
     # We no longer need HuggingFace datasets since we're working with local JSON files
     pass

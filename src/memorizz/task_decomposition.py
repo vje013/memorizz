@@ -1,7 +1,9 @@
-from typing import List, Dict, Any, Optional
-from .memagent import MemAgent
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import json
 import logging
+
+if TYPE_CHECKING:
+    from .memagent import MemAgent
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +39,10 @@ class SubTask:
 class TaskDecomposer:
     """Handles task decomposition for multi-agent coordination."""
     
-    def __init__(self, root_agent: MemAgent):
+    def __init__(self, root_agent: 'MemAgent'):
         self.root_agent = root_agent
         
-    def analyze_delegate_capabilities(self, delegates: List[MemAgent]) -> Dict[str, Dict[str, Any]]:
+    def analyze_delegate_capabilities(self, delegates: List['MemAgent']) -> Dict[str, Dict[str, Any]]:
         """
         Analyze the capabilities of delegate agents.
         
@@ -83,7 +85,7 @@ class TaskDecomposer:
     
     def decompose_task(self, 
                       user_query: str, 
-                      delegates: List[MemAgent]) -> List[SubTask]:
+                      delegates: List['MemAgent']) -> List[SubTask]:
         """
         Decompose a complex task into sub-tasks aligned with delegate capabilities.
         
@@ -95,10 +97,16 @@ class TaskDecomposer:
             List[SubTask]: List of decomposed sub-tasks
         """
         try:
+            logger.info(f"Starting task decomposition for query: {user_query}")
+            logger.info(f"Number of delegates: {len(delegates)}")
+            
             # Analyze delegate capabilities
+            logger.info("Analyzing delegate capabilities...")
             capabilities = self.analyze_delegate_capabilities(delegates)
+            logger.info(f"Analyzed capabilities for {len(capabilities)} agents")
             
             # Create decomposition prompt
+            logger.info("Creating decomposition prompt...")
             decomposition_prompt = self._create_decomposition_prompt(user_query, capabilities)
             
             # Use the root agent's model to decompose the task
@@ -107,16 +115,23 @@ class TaskDecomposer:
                 {"role": "user", "content": f"Please decompose this task: {user_query}"}
             ]
             
+            logger.info("Calling LLM for task decomposition...")
             response = self.root_agent.model.client.responses.create(
                 model="gpt-4.1",
                 input=messages
             )
             
+            logger.info(f"LLM response received: {response.output_text[:200]}..." if response.output_text else "No response text")
+            
             # Parse the response to extract sub-tasks
-            return self._parse_decomposition_response(response.output_text, capabilities)
+            logger.info("Parsing decomposition response...")
+            sub_tasks = self._parse_decomposition_response(response.output_text, capabilities)
+            logger.info(f"Successfully parsed {len(sub_tasks)} sub-tasks")
+            
+            return sub_tasks
             
         except Exception as e:
-            logger.error(f"Error decomposing task: {e}")
+            logger.error(f"Error decomposing task: {e}", exc_info=True)
             return []
     
     def _create_decomposition_prompt(self, 
