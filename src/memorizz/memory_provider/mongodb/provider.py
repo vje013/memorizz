@@ -15,10 +15,13 @@ from ...memory_component.memory_mode import MemoryMode
 from ...memagent import MemAgentModel
 from ...persona.persona import Persona
 from ...persona.role_type import RoleType
+import logging
 
 # Use TYPE_CHECKING for forward references to avoid circular imports
 # if TYPE_CHECKING:
 #     from ...memagent import MemAgentModel
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MongoDBConfig():
@@ -63,6 +66,7 @@ class MongoDBProvider(MemoryProvider):
         self.conversation_memory_collection = self.db[MemoryType.CONVERSATION_MEMORY.value]
         self.workflow_memory_collection = self.db[MemoryType.WORKFLOW_MEMORY.value]
         self.memagent_collection = self.db[MemoryType.MEMAGENT.value]
+        self.shared_memory_collection = self.db[MemoryType.SHARED_MEMORY.value]
 
         # Create all memory stores in MongoDB.
         self._create_memory_stores()
@@ -81,6 +85,7 @@ class MongoDBProvider(MemoryProvider):
         self._create_memory_store(MemoryType.LONG_TERM_MEMORY)
         self._create_memory_store(MemoryType.CONVERSATION_MEMORY)
         self._create_memory_store(MemoryType.WORKFLOW_MEMORY)
+        self._create_memory_store(MemoryType.SHARED_MEMORY)
     
     def _create_memory_store(self, memory_store_type: MemoryType) -> None:
         """
@@ -164,6 +169,8 @@ class MongoDBProvider(MemoryProvider):
             collection = self.long_term_memory_collection
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             collection = self.conversation_memory_collection
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            collection = self.shared_memory_collection
 
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
@@ -251,7 +258,8 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection
         }
         
         collection = collection_mapping.get(memory_store_type)
@@ -469,7 +477,8 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection
         }
         
         collection = collection_mapping.get(memory_store_type)
@@ -574,6 +583,11 @@ class MongoDBProvider(MemoryProvider):
             return list(self.conversation_memory_collection.find())
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             return list(self.workflow_memory_collection.find())
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            return list(self.shared_memory_collection.find())
+        else:
+            logger.warning(f"Unsupported memory store type for list_all: {memory_store_type}")
+            return []
         
     def update_by_id(self, id: str, data: Dict[str, Any], memory_store_type: MemoryType) -> bool:
         """
@@ -600,22 +614,29 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection
         }
         
         collection = collection_mapping.get(memory_store_type)
         if collection is None:
+            logger.error(f"No collection mapping found for memory store type: {memory_store_type}")
             return False
             
         # Update using MongoDB _id only
         try:
             if ObjectId.is_valid(id):
                 result = collection.update_one({"_id": ObjectId(id)}, {"$set": data})
-                return result.modified_count > 0
-        except Exception:
-            pass
-            
-        return False
+                success = result.modified_count > 0
+                if not success:
+                    logger.warning(f"Update operation found no documents to modify for id: {id}")
+                return success
+            else:
+                logger.error(f"Invalid ObjectId: {id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating document with id {id}: {e}", exc_info=True)
+            return False
             
             
     def update_toolbox_item(self, id: str, data: Dict[str, Any]) -> bool:

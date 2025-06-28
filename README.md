@@ -79,12 +79,12 @@ print(response)  # Agent remembers John is a software engineer
 
 ```python
 from memorizz.persona import Persona
-from memorizz.persona import Persona
+from memorizz.persona.role_type import RoleType
 
-# Create a technical expert persona
+# Create a technical expert persona using predefined role types
 tech_expert = Persona(
     name="TechExpert",
-    role="Senior Software Engineer",
+    role=RoleType.TECHNICAL_EXPERT,  # Use predefined role enum
     goals="Help developers solve complex technical problems with detailed explanations.",
     background="10+ years experience in Python, AI/ML, and distributed systems."
 )
@@ -100,12 +100,14 @@ response = agent.run("How should I design a scalable microservices architecture?
 ### 3. Tool Registration and Function Calling
 
 ```python
-from memorizz.database.mongodb import MongoDBTools, MongoDBToolsConfig
+from memorizz.database import MongoDBTools, MongoDBToolsConfig
+from memorizz.embeddings.openai import get_embedding
 
 # Configure tools database
 tools_config = MongoDBToolsConfig(
-    uri="your-mongodb-atlas-uri",
-    database_name="my_tools_db"
+    mongo_uri="your-mongodb-atlas-uri",
+    db_name="my_tools_db",
+    get_embedding=get_embedding  # Required embedding function
 )
 
 # Register tools using decorator
@@ -124,7 +126,7 @@ with MongoDBTools(tools_config) as tools:
         return f"Weather in {city}: 72°F, sunny"
     
     # Add tools to your agent
-    agent.add_tool(toolbox=tools)
+    agent.add_tool(toolbox=toolbox)
     
     # Agent can now discover and use these tools automatically
     response = agent.run("What's the weather in San Francisco and calculate interest on $1000 at 5% for 3 years?")
@@ -136,23 +138,37 @@ with MongoDBTools(tools_config) as tools:
 
 MemoRizz supports different memory categories for organizing information:
 
-- **Conversation**: Chat history and dialogue context
-- **Task**: Goal-oriented information and progress tracking  
-- **Workflow**: Multi-step process information
-- **General**: Factual knowledge and declarative information
-- **Working**: Temporary processing space (LLM context)
+- **CONVERSATION_MEMORY**: Chat history and dialogue context
+- **WORKFLOW_MEMORY**: Multi-step process information
+- **LONG_TERM_MEMORY**: Persistent knowledge storage with semantic search
+- **SHORT_TERM_MEMORY**: Temporary processing information
+- **PERSONAS**: Agent personality and behavior definitions
+- **TOOLBOX**: Function definitions and metadata
+- **SHARED_MEMORY**: Multi-agent coordination and communication
+- **MEMAGENT**: Agent configurations and states
 
-### Vector Search
+### Long-Term Knowledge Management
 
-All stored information is automatically embedded and indexed for semantic search:
+Store and retrieve persistent knowledge with semantic search:
 
 ```python
-# Store information with automatic embedding
-agent.store_memory("I prefer Python for backend development", memory_type="general")
+# Add knowledge to long-term memory
+knowledge_id = agent.add_long_term_memory(
+    "I prefer Python for backend development due to its simplicity and extensive libraries.", 
+    namespace="preferences"
+)
 
-# Later, semantically related queries will retrieve this info
-response = agent.run("What programming languages do I like?")
-# Agent will find and use the stored preference
+# Retrieve related knowledge
+knowledge_entries = agent.retrieve_long_term_memory(knowledge_id)
+
+# Update existing knowledge
+agent.update_long_term_memory(
+    knowledge_id, 
+    "I prefer Python for backend development and FastAPI for building APIs."
+)
+
+# Delete knowledge when no longer needed
+agent.delete_long_term_memory(knowledge_id)
 ```
 
 ### Tool Discovery
@@ -175,32 +191,70 @@ Extend the memory provider interface for custom storage backends:
 from memorizz.memory_provider.base import MemoryProvider
 
 class CustomMemoryProvider(MemoryProvider):
-    def store_memory(self, content, memory_type, **kwargs):
+    def store(self, data, memory_store_type):
         # Your custom storage logic
         pass
     
-    def retrieve_memories(self, query, memory_type=None, limit=10):
+    def retrieve_by_query(self, query, memory_store_type, limit=10):
         # Your custom retrieval logic
         pass
 ```
 
-### Memory Management
+### Multi-Agent Workflows
 
-Control how memories are stored and retrieved:
+Create collaborative agent systems:
 
 ```python
-# Store with metadata
-agent.store_memory(
-    content="Completed project X with React and Node.js",
-    memory_type="task",
-    metadata={"project": "X", "technologies": ["React", "Node.js"]}
+# Create specialized delegate agents
+data_analyst = MemAgent(
+    model=OpenAI(model="gpt-4"),
+    instruction="You are a data analysis expert.",
+    memory_provider=memory_provider
 )
 
-# Retrieve specific memories
-memories = agent.retrieve_memories(
-    query="projects with React",
-    memory_type="task",
-    limit=5
+report_writer = MemAgent(
+    model=OpenAI(model="gpt-4"), 
+    instruction="You are a report writing specialist.",
+    memory_provider=memory_provider
+)
+
+# Create orchestrator agent with delegates
+orchestrator = MemAgent(
+    model=OpenAI(model="gpt-4"),
+    instruction="You coordinate between specialists to complete complex tasks.",
+    memory_provider=memory_provider,
+    delegates=[data_analyst, report_writer]
+)
+
+# Execute multi-agent workflow
+response = orchestrator.run("Analyze our sales data and create a quarterly report.")
+```
+
+### Memory Management Operations
+
+Control agent memory persistence:
+
+```python
+# Save agent state to memory provider
+agent.save()
+
+# Load existing agent by ID
+existing_agent = MemAgent.load(
+    agent_id="your-agent-id",
+    memory_provider=memory_provider
+)
+
+# Update agent configuration
+agent.update(
+    instruction="Updated instruction for the agent",
+    max_steps=30
+)
+
+# Delete agent and optionally cascade delete memories
+MemAgent.delete_by_id(
+    agent_id="agent-id-to-delete",
+    cascade=True,  # Deletes associated memories
+    memory_provider=memory_provider
 )
 ```
 
@@ -226,10 +280,12 @@ memories = agent.retrieve_memories(
 
 Check out the `examples/` directory for complete working examples:
 
-- **Basic Agent**: Simple conversational agent with memory
-- **Specialized Agent**: Technical expert with persona
-- **Tool Integration**: Agent with custom function calling
-- **Memory Management**: Advanced memory storage and retrieval
+- **memagent_single_agent.ipynb**: Basic conversational agent with memory
+- **memagents_multi_agents.ipynb**: Multi-agent collaboration workflows
+- **persona.ipynb**: Creating and using agent personas
+- **toolbox.ipynb**: Tool registration and function calling
+- **workflow.ipynb**: Workflow memory and process tracking
+- **knowledge_base.ipynb**: Long-term knowledge management
 
 ## Configuration
 
@@ -258,6 +314,7 @@ export MONGODB_DB_NAME="memorizz"  # Default database name
 1. **MongoDB Connection**: Ensure your IP is whitelisted in Atlas
 2. **Vector Search**: Verify vector search is enabled on your cluster
 3. **API Keys**: Check OpenAI API key is valid and has credits
+4. **Import Errors**: Ensure you're using the correct import paths shown in examples
 
 ## Contributing
 

@@ -236,18 +236,40 @@ class Toolbox:
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """
-        List all tools in the toolbox.
+        List all tools in the toolbox from the memory provider.
+        Note: This returns ALL tool metadata from the database, 
+        regardless of whether the functions are available in this session.
         
         Returns:
         --------
         List[Dict[str, Any]]
-            A list of all tools metadata in the toolbox (without actual function objects).
+            A list of all tool metadata from the memory provider.
         """
-        tools = self.memory_provider.list_all(memory_store_type=MemoryType.TOOLBOX)
+        return self.memory_provider.list_all(memory_store_type=MemoryType.TOOLBOX)
+
+    def list_available_tools(self) -> List[Dict[str, Any]]:
+        """
+        List only tools that have both metadata in the database AND 
+        callable functions available in the current session.
         
-        # Return just the metadata - do NOT add actual function objects
-        # The functions are kept separate in self._tools for execution
-        return tools
+        This is more efficient than list_tools() when you only want 
+        tools that can actually be executed.
+        
+        Returns:
+        --------
+        List[Dict[str, Any]]
+            A list of tool metadata for tools with available functions.
+        """
+        available_tools = []
+        
+        for tool_id, func in self._tools.items():
+            if callable(func):
+                # Get metadata for this tool
+                meta = self.get_tool_by_id(tool_id)
+                if meta:
+                    available_tools.append(meta)
+        
+        return available_tools
     
     def get_function_by_id(self, tool_id: str) -> Optional[Callable]:
         """

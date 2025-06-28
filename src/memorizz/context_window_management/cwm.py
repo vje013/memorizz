@@ -1,4 +1,3 @@
-
 from typing import List
 # from ..memagent import MemAgent
 from ..memory_provider.memory_type import MemoryType
@@ -31,6 +30,11 @@ class CWM:
             prompt += f"\n\nMemory Type: {MemoryType.WORKFLOW_MEMORY.value}\n"
             prompt += f"Memory Type Description: This is a memory type that stores the workflow history between the agent and the user.\n"
             prompt += f"Memory Type Usage: Use this to provide continuity, avoid repeating yourself, and reference prior turns.\n"
+        elif memory_type.value == MemoryType.SHARED_MEMORY.value:
+            # Construct a prompt that informs the agent on what the memory type means and how to use it
+            prompt += f"\n\nMemory Type: {MemoryType.SHARED_MEMORY.value}\n"
+            prompt += f"Memory Type Description: This is a memory type that stores shared blackboard information for multi-agent coordination.\n"
+            prompt += f"Memory Type Usage: Use this to coordinate with other agents, understand your role in the agent hierarchy, and access shared coordination activities and context.\n"
         
         return prompt
 
