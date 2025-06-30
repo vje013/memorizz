@@ -1,7 +1,13 @@
+<div align="center">
+
 # Memorizz 🧠
+
+📊 **[Agent Memory Presentation](https://docs.google.com/presentation/d/1iSu667m5-pOXMrJq_LjkfnfD4V0rW1kbhGaQ2u3TKXQ/edit?usp=sharing)** | 🎥 **[AIEWF Richmond's Talk](https://youtu.be/W2HVdB4Jbjs?si=faaI3cMLc71Efpeu)**
 
 [![PyPI version](https://badge.fury.io/py/memorizz.svg)](https://badge.fury.io/py/memorizz)
 [![PyPI downloads](https://img.shields.io/pypi/dm/memorizz.svg)](https://pypistats.org/packages/memorizz)
+
+</div>
 
 > **⚠️ IMPORTANT WARNING ⚠️**
 > 
@@ -13,7 +19,9 @@
 
 ## Overview
 
-MemoRizz is an advanced memory management framework designed for AI agents, enabling persistent, context-aware, and semantically searchable information storage. It seamlessly integrates MongoDB with vector embedding capabilities, empowering agents with sophisticated cognitive functions such as conversation history tracking, tool usage management, and consistent persona maintenance. 
+MemoRizz is an advanced memory management framework designed for AI agents, enabling persistent, context-aware, and semantically searchable information storage. It seamlessly integrates MongoDB with vector embedding capabilities, empowering agents with sophisticated cognitive functions such as conversation history tracking, tool usage management, and consistent persona maintenance.
+
+MemoRizz provides flexible single and multi-agent frameworks that enable you to instantiate memory-augmented agents with specifically allocated memory types tailored to your application requirements. 
 
 **Why MemoRizz?**
 - 🧠 **Persistent Memory**: Your AI agents remember conversations across sessions
