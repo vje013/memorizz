@@ -8,7 +8,7 @@ version = "0.0.23"
 description = "A memory management library for Python"
 readme = "README.md"
 requires-python = ">=3.7"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     { name = "Richmond Alake", email = "richmond.alake@gmail.com" }
 ]
