@@ -19,9 +19,12 @@
 
 ## Overview
 
-MemoRizz is an advanced memory management framework designed for AI agents, enabling persistent, context-aware, and semantically searchable information storage. It seamlessly integrates MongoDB with vector embedding capabilities, empowering agents with sophisticated cognitive functions such as conversation history tracking, tool usage management, and consistent persona maintenance.
+**MemoRizz is a memory management framework for AI agents designed to create memory-augmented agents with explicit memory type allocation based on application mode.**
 
-MemoRizz provides flexible single and multi-agent frameworks that enable you to instantiate memory-augmented agents with specifically allocated memory types tailored to your application requirements. 
+The framework enables developers to build context-aware agents capable of sophisticated information retrieval and storage. 
+
+MemoRizz provides flexible single and multi-agent architectures that allow you to instantiate agents with specifically allocated memory types—whether episodic, semantic, procedural, or working memory—tailored to your application's operational requirements.
+
 
 **Why MemoRizz?**
 - 🧠 **Persistent Memory**: Your AI agents remember conversations across sessions
@@ -154,6 +157,7 @@ MemoRizz supports different memory categories for organizing information:
 - **TOOLBOX**: Function definitions and metadata
 - **SHARED_MEMORY**: Multi-agent coordination and communication
 - **MEMAGENT**: Agent configurations and states
+- **SUMMARIES**: Compressed summaries of past interactions for efficient memory management
 
 ### Long-Term Knowledge Management
 

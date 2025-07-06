@@ -1,25 +1,17 @@
+
+import time
+import logging
+from bson import ObjectId
 from pymongo import MongoClient
-from pymongo.operations import SearchIndexModel
 from ..base import MemoryProvider
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
 from ..memory_type import MemoryType
-from ...embeddings.openai import get_embedding
-from ...embeddings.openai import get_embedding_dimensions
-from bson import ObjectId
-from pymongo.collection import Collection
-from pymongo.database import Database
-from datetime import datetime
-import pprint
-from ...memory_component.memory_mode import MemoryMode
 from ...memagent import MemAgentModel
 from ...persona.persona import Persona
 from ...persona.role_type import RoleType
-import logging
-
-# Use TYPE_CHECKING for forward references to avoid circular imports
-# if TYPE_CHECKING:
-#     from ...memagent import MemAgentModel
+from typing import Dict, Any, Optional, List
+from pymongo.operations import SearchIndexModel
+from ...embeddings.openai import get_embedding, get_embedding_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +59,7 @@ class MongoDBProvider(MemoryProvider):
         self.workflow_memory_collection = self.db[MemoryType.WORKFLOW_MEMORY.value]
         self.memagent_collection = self.db[MemoryType.MEMAGENT.value]
         self.shared_memory_collection = self.db[MemoryType.SHARED_MEMORY.value]
+        self.summaries_collection = self.db[MemoryType.SUMMARIES.value]
 
         # Create all memory stores in MongoDB.
         self._create_memory_stores()
@@ -86,6 +79,7 @@ class MongoDBProvider(MemoryProvider):
         self._create_memory_store(MemoryType.CONVERSATION_MEMORY)
         self._create_memory_store(MemoryType.WORKFLOW_MEMORY)
         self._create_memory_store(MemoryType.SHARED_MEMORY)
+        self._create_memory_store(MemoryType.SUMMARIES)
     
     def _create_memory_store(self, memory_store_type: MemoryType) -> None:
         """
@@ -117,21 +111,10 @@ class MongoDBProvider(MemoryProvider):
         --------
         None
         """
-
-        self._ensure_vector_index(self.persona_collection, "vector_index", memory_store=False)
-        self._ensure_vector_index(self.toolbox_collection, "vector_index", memory_store=True)
-        self._ensure_vector_index(self.short_term_memory_collection, "vector_index", memory_store=True)
-        self._ensure_vector_index(self.long_term_memory_collection, "vector_index", memory_store=True)
-        self._ensure_vector_index(self.conversation_memory_collection, "vector_index", memory_store=True)
-        self._ensure_vector_index(self.workflow_memory_collection, "vector_index", memory_store=True)
-        self._ensure_vector_index(self.memagent_collection, "vector_index", memory_store=True)
-
-
+        # Create vector indexes for all memory store types
         for memory_store_type in MemoryType:
-            if memory_store_type == MemoryType.PERSONAS:
-                memory_store_present = False
-            else:
-                memory_store_present = True
+            # PERSONAS collection doesn't need memory_id filter since it's not memory-scoped
+            memory_store_present = memory_store_type != MemoryType.PERSONAS
 
             self._ensure_vector_index(
                 collection=self.db[memory_store_type.value],
@@ -171,6 +154,8 @@ class MongoDBProvider(MemoryProvider):
             collection = self.conversation_memory_collection
         elif memory_store_type == MemoryType.SHARED_MEMORY:
             collection = self.shared_memory_collection
+        elif memory_store_type == MemoryType.SUMMARIES:
+            collection = self.summaries_collection
 
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
@@ -234,6 +219,8 @@ class MongoDBProvider(MemoryProvider):
             return self.long_term_memory_collection.find(query, limit=limit)
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self.conversation_memory_collection.find(query, limit=limit)
+        elif memory_store_type == MemoryType.SUMMARIES:
+            return self.retrieve_summaries_by_query(query, limit)
        
     def retrieve_by_id(self, id: str, memory_store_type: MemoryType) -> Optional[Dict[str, Any]]:
         """
@@ -259,7 +246,8 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
-            MemoryType.SHARED_MEMORY: self.shared_memory_collection
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
+            MemoryType.SUMMARIES: self.summaries_collection
         }
         
         collection = collection_mapping.get(memory_store_type)
@@ -268,7 +256,7 @@ class MongoDBProvider(MemoryProvider):
             
         # Set projection to exclude embedding for performance
         projection = {"embedding": 0} if memory_store_type in [
-            MemoryType.PERSONAS, MemoryType.TOOLBOX, MemoryType.WORKFLOW_MEMORY
+            MemoryType.PERSONAS, MemoryType.TOOLBOX, MemoryType.WORKFLOW_MEMORY, MemoryType.SUMMARIES
         ] else None
         
         # Retrieve using MongoDB _id only
@@ -312,6 +300,8 @@ class MongoDBProvider(MemoryProvider):
             return self.long_term_memory_collection.find_one({"name": name})
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self.conversation_memory_collection.find_one({"name": name})
+        elif memory_store_type == MemoryType.SUMMARIES:
+            return self.summaries_collection.find_one({"name": name}, {"embedding": 0})
         
 
 
@@ -453,6 +443,95 @@ class MongoDBProvider(MemoryProvider):
         # Return the results
         return results if results else None
 
+    def retrieve_summaries_by_query(self, query: Dict[str, Any], limit: int = 1) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve summaries by query using vector search.
+        
+        Parameters:
+        -----------
+        query : Dict[str, Any]
+            The query to use for retrieval.
+        limit : int
+            The maximum number of summaries to return.
+            
+        Returns:
+        --------
+        Optional[List[Dict[str, Any]]]
+            The retrieved summaries, or None if not found.
+        """
+        # Get the embedding for the query
+        embedding = get_embedding(query)
+
+        # Create the vector search pipeline
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "queryVector": embedding,
+                    "path": "embedding",
+                    "numCandidates": 100,
+                    "limit": limit,
+                    "index": "vector_index"
+                }
+            },
+            {
+                "$project": {
+                    "_id": 1,
+                    "embedding": 0,
+                    "score": { "$meta": "vectorSearchScore" }
+                }
+            }
+        ]
+
+        # Execute the vector search
+        results = list(self.summaries_collection.aggregate(pipeline))
+
+        # Return the results
+        return results if results else None
+
+    def get_summaries_by_memory_id(self, memory_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieve summaries for a specific memory_id, ordered by timestamp (most recent first).
+        
+        Parameters:
+        -----------
+        memory_id : str
+            The memory_id to retrieve summaries for.
+        limit : int
+            The maximum number of summaries to return.
+            
+        Returns:
+        --------
+        List[Dict[str, Any]]
+            List of summaries for the memory_id.
+        """
+        return list(self.summaries_collection.find(
+            {"memory_id": memory_id}, 
+            {"embedding": 0}
+        ).sort("period_end", -1).limit(limit))
+
+    def get_summaries_by_time_range(self, memory_id: str, start_time: float, end_time: float) -> List[Dict[str, Any]]:
+        """
+        Retrieve summaries for a specific memory_id within a time range.
+        
+        Parameters:
+        -----------
+        memory_id : str
+            The memory_id to retrieve summaries for.
+        start_time : float
+            Start timestamp for the range.
+        end_time : float
+            End timestamp for the range.
+            
+        Returns:
+        --------
+        List[Dict[str, Any]]
+            List of summaries within the time range.
+        """
+        return list(self.summaries_collection.find({
+            "memory_id": memory_id,
+            "period_start": {"$gte": start_time},
+            "period_end": {"$lte": end_time}
+        }, {"embedding": 0}).sort("period_start", 1))
 
     def delete_by_id(self, id: str, memory_store_type: MemoryType) -> bool:
         """
@@ -478,7 +557,8 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
-            MemoryType.SHARED_MEMORY: self.shared_memory_collection
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
+            MemoryType.SUMMARIES: self.summaries_collection
         }
         
         collection = collection_mapping.get(memory_store_type)
@@ -523,6 +603,10 @@ class MongoDBProvider(MemoryProvider):
             result = self.conversation_memory_collection.delete_one({"name": name})
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             result = self.workflow_memory_collection.delete_one({"name": name})
+        elif memory_store_type == MemoryType.SUMMARIES:
+            result = self.summaries_collection.delete_one({"name": name})
+        else:
+            return False
         
         return result.deleted_count > 0
 
@@ -552,6 +636,10 @@ class MongoDBProvider(MemoryProvider):
             result = self.conversation_memory_collection.delete_many({})
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             result = self.workflow_memory_collection.delete_many({})
+        elif memory_store_type == MemoryType.SUMMARIES:
+            result = self.summaries_collection.delete_many({})
+        else:
+            return False
             
         return result.deleted_count > 0
             
@@ -585,6 +673,8 @@ class MongoDBProvider(MemoryProvider):
             return list(self.workflow_memory_collection.find())
         elif memory_store_type == MemoryType.SHARED_MEMORY:
             return list(self.shared_memory_collection.find())
+        elif memory_store_type == MemoryType.SUMMARIES:
+            return list(self.summaries_collection.find({}, {"embedding": 0}))
         else:
             logger.warning(f"Unsupported memory store type for list_all: {memory_store_type}")
             return []
@@ -615,7 +705,8 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
             MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
-            MemoryType.SHARED_MEMORY: self.shared_memory_collection
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
+            MemoryType.SUMMARIES: self.summaries_collection
         }
         
         collection = collection_mapping.get(memory_store_type)
@@ -847,8 +938,6 @@ class MongoDBProvider(MemoryProvider):
         MemAgentModel
             The retrieved memagent.
         """
-        from ...memory_component.memory_mode import MemoryMode
-        
         # Get the document from MongoDB using _id
         try:
             if ObjectId.is_valid(agent_id):
@@ -865,7 +954,7 @@ class MongoDBProvider(MemoryProvider):
         # Use the MongoDB _id as agent_id since we no longer store agent_id field
         memagent = MemAgentModel(
             instruction=document.get("instruction"),
-            memory_mode=document.get("memory_mode"),
+            application_mode=document.get("application_mode", "assistant"),
             max_steps=document.get("max_steps"),
             memory_ids=document.get("memory_ids") or [],
             agent_id=str(document.get("_id")),
@@ -919,7 +1008,7 @@ class MongoDBProvider(MemoryProvider):
             # Use the MongoDB _id as agent_id since we no longer store agent_id field
             agent = MemAgentModel(
                 instruction=doc.get("instruction"),
-                memory_mode=doc.get("memory_mode"),
+                application_mode=doc.get("application_mode", "assistant"),
                 max_steps=doc.get("max_steps"),
                 memory_ids=doc.get("memory_ids") or [],
                 agent_id=str(doc.get("_id")),
@@ -1087,7 +1176,7 @@ class MongoDBProvider(MemoryProvider):
 
     def _setup_vector_search_index(self, collection, index_name="vector_index", memory_store: bool = False):
         """
-        Setup a vector search index for a MongoDB collection and wait for 30 seconds.
+        Setup a vector search index for a MongoDB collection and wait for it to become queryable.
 
         Args:
         collection: MongoDB collection object
@@ -1126,18 +1215,67 @@ class MongoDBProvider(MemoryProvider):
         try:
             result = collection.create_search_index(model=new_vector_search_index_model)
             print(f"Creating index '{index_name}'... for collection {collection.name}")
+            
+            # Wait for the index to become queryable using polling mechanism
+            self._wait_for_index_ready(collection, result, index_name)
+            
             return result
 
         except Exception as e:
             print(f"Error creating new vector search index '{index_name}': {e!s}")
             return None
+
+    def _wait_for_index_ready(self, collection, index_name_result, display_name="vector_index"):
+        """
+        Wait for a MongoDB Atlas search index to become queryable using polling.
+        
+        Args:
+        collection: MongoDB collection object
+        index_name_result: The name/result returned from create_search_index
+        display_name: Human-readable name for logging (default: "vector_index")
+        """
+        print(f"Polling to check if the index '{index_name_result}' is ready. This may take up to a minute.")
+        
+        # Define predicate function to check if index is queryable
+        predicate = lambda index: index.get("queryable") is True
+        
+        while True:
+            try:
+                # List search indexes and find the one we just created
+                indices = list(collection.list_search_indexes(index_name_result))
+                
+                # Check if the index exists and is queryable
+                if indices and predicate(indices[0]):
+                    break
+                    
+                # Wait 5 seconds before checking again
+                time.sleep(5)
+                
+            except Exception as e:
+                print(f"Error checking index readiness: {e}")
+                # Continue polling even if there's an error
+                time.sleep(5)
+        
+        print(f"Index '{index_name_result}' is ready for querying in collection {collection.name}.")
         
     def _ensure_vector_index(self, collection, index_name="vector_index", memory_store: bool = False):
+        """
+        Ensure a vector search index exists for the collection. If it doesn't exist, create it and wait for it to be ready.
+        
+        Args:
+        collection: MongoDB collection object
+        index_name: Name of the index (default: "vector_index")
+        memory_store: Whether to add the memory_id field to the index (default: False)
+        """
         search_indexes = list(collection.list_search_indexes())
         has_vector_index = any(index.get("name") == index_name and index.get("type") == "vectorSearch" for index in search_indexes)
+        
         if not has_vector_index:
+            print(f"Vector search index '{index_name}' not found for collection {collection.name}. Creating...")
             self._setup_vector_search_index(collection, index_name, memory_store)
-            print(f"Created vector index for {collection.name} collection successfully.")
+            print(f"Vector index '{index_name}' for {collection.name} collection is now ready for use.")
+        else:
+            print(f"Vector search index '{index_name}' already exists for collection {collection.name}.")
 
     def close(self) -> None:
         """Close the connection to MongoDB."""

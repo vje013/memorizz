@@ -7,7 +7,7 @@ from .memory_component import MemoryComponent, ConversationMemoryComponent
 from datetime import datetime
 import uuid
 from .memory_provider import MemoryProvider
-from .memory_component.memory_mode import MemoryMode
+from .memory_component.application_mode import ApplicationMode, ApplicationModeConfig
 from .memory_provider.memory_type import MemoryType
 import logging
 from pydantic import BaseModel
@@ -39,7 +39,8 @@ class MemAgentModel(BaseModel):
     tools: Optional[Union[List, Toolbox]] = None
     persona: Optional[Persona] = None
     instruction: Optional[str] = None
-    memory_mode: Optional[str] = MemoryMode.Default
+    application_mode: Optional[str] = ApplicationMode.DEFAULT.value
+    memory_types: Optional[List[str]] = None  # Custom memory types that override application_mode defaults
     max_steps: int = DEFAULT_MAX_STEPS
     memory_ids: Optional[List[str]] = None
     tool_access: Optional[str] = DEFAULT_TOOL_ACCESS
@@ -58,7 +59,8 @@ class MemAgent:
         tools: Optional[Union[List, Toolbox]] = None, # List of tools to use or toolbox
         persona: Optional[Persona] = None, # Persona of the agent
         instruction: Optional[str] = None, # Instruction of the agent
-        memory_mode: Optional[str] = MemoryMode.Default, # Memory mode of the agent
+        application_mode: Optional[str] = ApplicationMode.DEFAULT.value, # Application mode of the agent
+        memory_types: Optional[List[Union[str, MemoryType]]] = None, # Custom memory types (overrides application_mode)
         max_steps: int = DEFAULT_MAX_STEPS, # Maximum steps of the agent
         memory_provider: Optional[MemoryProvider] = None, # Memory provider of the agent
         memory_ids: Optional[Union[str, List[str]]] = None, # Memory id(s) of the agent
@@ -69,8 +71,34 @@ class MemAgent:
         # If the memory provider is not provided, then we use the default memory provider
         self.memory_provider = memory_provider or MemoryProvider()
 
-        # Initialize the memory component based on the memory mode
-        self.memory_component = MemoryComponent(memory_mode, self.memory_provider)
+        # Validate and set the application mode (handles both strings and enums)
+        try:
+            self.application_mode = ApplicationModeConfig.validate_mode(application_mode)
+        except ValueError as e:
+            print(f"Warning: {e}. Using default mode 'assistant'.")
+            self.application_mode = ApplicationMode.DEFAULT
+
+        # Resolve final memory types (custom memory_types override application_mode defaults)
+        if memory_types is not None:
+            # Convert string memory types to MemoryType enums
+            self.active_memory_types = []
+            for mt in memory_types:
+                if isinstance(mt, str):
+                    try:
+                        self.active_memory_types.append(MemoryType(mt.upper()))
+                    except ValueError:
+                        print(f"Warning: Invalid memory type '{mt}'. Skipping.")
+                elif isinstance(mt, MemoryType):
+                    self.active_memory_types.append(mt)
+            
+            print(f"Using custom memory types: {[mt.value for mt in self.active_memory_types]}")
+        else:
+            # Use default memory types from application mode
+            self.active_memory_types = ApplicationModeConfig.get_memory_types(self.application_mode)
+            print(f"Using application mode '{self.application_mode.value}' with memory types: {[mt.value for mt in self.active_memory_types]}")
+
+        # Initialize the memory component based on the application mode
+        self.memory_component = MemoryComponent(self.application_mode.value, self.memory_provider)
 
         # Initialize the model - honor caller's model if provided, else use default
         # This allows users to specify their own model configuration
@@ -125,7 +153,6 @@ class MemAgent:
         self.tools = tools
         self.persona = persona
         self.instruction = instruction or DEFAULT_INSTRUCTION
-        self.memory_mode = memory_mode
         self.max_steps = max_steps
         self.tool_access = tool_access
         # Initialize memory_ids as a list, converting single string if needed
@@ -232,23 +259,21 @@ class MemAgent:
         """
         logger.info(f"ENTERING _export_multi_agent_logs for agent {self.agent_id}")
         try:
-            # More reliable multi-agent detection:
+            # Proper multi-agent detection:
             # 1. Agent has delegates (is root agent)
-            # 2. Agent has shared memory IDs (is part of shared session)
-            # 3. Agent is explicitly in multi-agent mode
-            memory_ids = getattr(self, 'memory_ids', []) or []
-            has_shared_memory_ids = len(memory_ids) > 0
+            # 2. Agent is part of an active shared memory session (true multi-agent coordination)
+            has_active_shared_session = self._has_shared_memory_session()
             
             is_multi_agent = (self.is_multi_agent_mode or 
                              len(self.delegates) > 0 or 
-                             has_shared_memory_ids)
+                             has_active_shared_session)
             
             # Debug logging to see what's happening
             logger.info(f"Multi-agent log export check for agent {self.agent_id}:")
             logger.info(f"  - is_multi_agent_mode: {self.is_multi_agent_mode}")
             logger.info(f"  - delegates count: {len(self.delegates)}")
-            logger.info(f"  - memory_ids: {memory_ids}")
-            logger.info(f"  - has_shared_memory_ids: {has_shared_memory_ids}")
+            logger.info(f"  - has_active_shared_session: {has_active_shared_session}")
+            logger.info(f"  - memory_ids (for context): {getattr(self, 'memory_ids', [])}")
             logger.info(f"  - Final is_multi_agent: {is_multi_agent}")
             
             if not is_multi_agent:
@@ -333,6 +358,10 @@ class MemAgent:
             return shared_memory.find_active_session_for_agent(self.agent_id) is not None
         except Exception:
             return False
+    
+    def _get_application_mode_value(self) -> str:
+        """Get the application mode value as a string, handling both enum and string cases."""
+        return self.application_mode.value if hasattr(self.application_mode, 'value') else self.application_mode
 
     def _format_blackboard_activity(self, entry_type: str, content: Dict[str, Any]) -> str:
         """
@@ -810,9 +839,8 @@ class MemAgent:
         # 3) Augment the user query with the query
         augmented_query = f"This is the query to be answered or key objective to be achieved: {query}"
 
-        # Get the prompt for the memory types
-        # TODO: Need to get the memory types the agent is using or infer from the memory_mode
-        memory_types = [MemoryType.WORKFLOW_MEMORY, MemoryType.CONVERSATION_MEMORY, MemoryType.PERSONAS]
+        # Get the prompt for the memory types from the agent's active memory types
+        memory_types = self.active_memory_types.copy()
         
         # Check if this agent has shared memory context available and include it in memory types
         try:
@@ -838,10 +866,13 @@ class MemAgent:
         # 5) Add conversation history
         augmented_query = self._add_conversation_history(augmented_query, memory_id)
 
-        # 6) Add relevant memory components
+        # 6) Add memory summaries
+        augmented_query = self._add_summaries(augmented_query, query, memory_id)
+
+        # 7) Add relevant memory components
         augmented_query = self._add_relevant_memory_components(augmented_query, query, memory_id)
 
-        # 7) Add long-term knowledge
+        # 8) Add long-term knowledge
         augmented_query = self._add_long_term_knowledge(augmented_query, query)
         
         # Reinforce the user query and the objective to end the prompt construction
@@ -851,7 +882,7 @@ class MemAgent:
 
     def _add_workflow_memory(self, augmented_query: str, query: str) -> str:
         """Add workflow memory context to the augmented query."""
-        if self.memory_mode in (MemoryMode.Workflow): #MemoryMode.Default is not used here because it is not a valid memory mode
+        if MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
             try:
                 # Retrieve relevant workflows based on the query
                 relevant_workflows = Workflow.retrieve_workflows_by_query(query, self.memory_provider)
@@ -901,6 +932,41 @@ class MemAgent:
         
         return augmented_query
 
+    def _add_summaries(self, augmented_query: str, query: str, memory_id: str) -> str:
+        """Add memory summaries to the augmented query."""
+        if MemoryType.SUMMARIES in self.active_memory_types:
+            try:
+                # Retrieve relevant summaries based on the query
+                summaries = self._load_relevant_memory_components(
+                    query, MemoryType.SUMMARIES, memory_id, limit=3
+                )
+                
+                if summaries and len(summaries) > 0:
+                    summaries_context = "\n\n---------THIS IS YOUR MEMORY SUMMARIES---------\n"
+                    summaries_context += "\n\nCompressed summaries of past interactions that provide broader context about user preferences, patterns, and historical conversations:\n"
+                    
+                    for summary in summaries:
+                        # Format summary content based on the data structure
+                        if isinstance(summary, dict):
+                            summary_content = summary.get('content', summary.get('summary', str(summary)))
+                            timestamp = summary.get('timestamp', summary.get('created_at', ''))
+                            memory_count = summary.get('memory_count', 'unknown')
+                            
+                            if timestamp:
+                                summaries_context += f"\n\nSummary (from {timestamp}, {memory_count} memories): {summary_content}"
+                            else:
+                                summaries_context += f"\n\nSummary ({memory_count} memories): {summary_content}"
+                        else:
+                            summaries_context += f"\n\nSummary: {summary}"
+                    
+                    augmented_query += summaries_context
+                    
+            except Exception as e:
+                logger.error(f"Error loading summaries: {str(e)}")
+                # Continue execution even if summaries loading fails
+        
+        return augmented_query
+
     def _add_relevant_memory_components(self, augmented_query: str, query: str, memory_id: str) -> str:
         """Add relevant memory components to the augmented query."""
         # Write relevant memory components prompt
@@ -908,8 +974,8 @@ class MemAgent:
         relevant_memory_components_prompt += "\n\nRelevant memory components that may be relevant to ensure you are on the right track, use this information to guide your execution:\n"
         augmented_query += relevant_memory_components_prompt
 
-        # 7) Append relevant memory components
-        if self.memory_mode in (MemoryMode.Conversational, MemoryMode.Default):
+        # Add conversation memory components
+        if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
             for mem in self._load_relevant_memory_components(
                 query, MemoryType.CONVERSATION_MEMORY, memory_id, limit=5
             ):
@@ -967,14 +1033,18 @@ class MemAgent:
 
     def _record_user_query(self, query: str, conversation_id: str, memory_id: str):
         """Record the user's query in conversational memory."""
-        if self.memory_mode in (MemoryMode.Conversational, MemoryMode.Default):
-            self._generate_conversational_memory_component({
+        if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
+            logger.info(f"Recording user query to memory - memory_id: {memory_id}, conversation_id: {conversation_id}")
+            memory_component = self._generate_conversational_memory_component({
                 "role": Role.USER,
                 "content": query,
                 "timestamp": datetime.now().isoformat(),
                 "conversation_id": conversation_id,
                 "memory_id": memory_id,
             })
+            logger.info(f"Created user memory component: {memory_component}")
+        else:
+            logger.warning(f"CONVERSATION_MEMORY not in active memory types for user query: {self.active_memory_types}")
 
     def _execute_main_loop(self, messages: List[Dict], query: str, memory_id: str, conversation_id: str) -> str:
         """
@@ -1118,7 +1188,7 @@ class MemAgent:
                 workflow.outcome = WorkflowOutcome.FAILURE
 
         # Store the complete workflow with all steps
-        if self.memory_mode in (MemoryMode.Workflow, MemoryMode.Default):
+        if MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
             try:
                 workflow.store_workflow(self.memory_provider)
             except Exception as e:
@@ -1201,14 +1271,18 @@ class MemAgent:
             str: The final response text.
         """
         # Record into memory
-        if self.memory_mode in (MemoryMode.Conversational, MemoryMode.General):
-            self._generate_conversational_memory_component({
+        if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
+            logger.info(f"Recording assistant response to memory - memory_id: {memory_id}, conversation_id: {conversation_id}")
+            memory_component = self._generate_conversational_memory_component({
                 "role": Role.ASSISTANT,
                 "content": response_text,
                 "timestamp": datetime.now().isoformat(),
                 "conversation_id": conversation_id,
                 "memory_id": memory_id,
             })
+            logger.info(f"Created memory component: {memory_component}")
+        else:
+            logger.warning(f"CONVERSATION_MEMORY not in active memory types: {self.active_memory_types}")
 
         # Append as assistant turn and return
         messages.append({
@@ -1330,7 +1404,8 @@ class MemAgent:
         # Create a new MemAgentModel with the current object's attributes
         memagent_to_save = MemAgentModel(
             instruction=self.instruction,
-            memory_mode=self.memory_mode,
+            application_mode=self._get_application_mode_value(),
+            memory_types=[mt.value for mt in self.active_memory_types],
             max_steps=self.max_steps,
             memory_ids=self.memory_ids,
             agent_id=self.agent_id,  # This will be removed in the provider
@@ -1357,7 +1432,6 @@ class MemAgent:
 
     def update(self, 
                instruction: Optional[str] = None,
-               memory_mode: Optional[str] = None,
                max_steps: Optional[int] = None,
                memory_ids: Optional[List[str]] = None,
                persona: Optional[Persona] = None,
@@ -1369,7 +1443,6 @@ class MemAgent:
 
         Parameters:
             instruction (str): The instruction of the memagent.
-            memory_mode (str): The memory mode of the memagent.
             max_steps (int): The maximum steps of the memagent.
             memory_ids (List[str]): The memory ids of the memagent.
             persona (Persona): The persona of the memagent.
@@ -1388,9 +1461,6 @@ class MemAgent:
 
         if instruction:
             self.instruction = instruction
-
-        if memory_mode:
-            self.memory_mode = memory_mode
 
         if max_steps:
             self.max_steps = max_steps
@@ -1443,7 +1513,8 @@ class MemAgent:
 
         memagent_to_update = MemAgentModel(
             instruction=self.instruction,
-            memory_mode=self.memory_mode,
+            application_mode=self._get_application_mode_value(),
+            memory_types=[mt.value for mt in self.active_memory_types],
             max_steps=self.max_steps,
             memory_ids=self.memory_ids,
             agent_id=self.agent_id,
@@ -1486,19 +1557,16 @@ class MemAgent:
         if not memagent:
             raise ValueError(f"MemAgent with agent id {agent_id} not found in the memory provider")
         
-        # Convert memory_mode string to MemoryMode class attribute if needed
-        if memagent and isinstance(memagent.memory_mode, str):
-            if memagent.memory_mode == "general":
-                memagent.memory_mode = MemoryMode.General
-            elif memagent.memory_mode == "conversational":
-                memagent.memory_mode = MemoryMode.Conversational
-            elif memagent.memory_mode == "task":
-                memagent.memory_mode = MemoryMode.Task
-            elif memagent.memory_mode == "workflow":
-                memagent.memory_mode = MemoryMode.Workflow
-            else:
-                # Default to General if string doesn't match
-                memagent.memory_mode = MemoryMode.General
+        # Get application_mode and memory_types from stored agent
+        application_mode_to_use = None
+        memory_types_to_use = None
+        
+        if hasattr(memagent, 'application_mode') and memagent.application_mode:
+            application_mode_to_use = memagent.application_mode
+            if hasattr(memagent, 'memory_types') and memagent.memory_types:
+                memory_types_to_use = memagent.memory_types
+        else:
+            application_mode_to_use = ApplicationMode.DEFAULT.value
 
         # Load delegate agents if they exist in the stored data
         loaded_delegates = None
@@ -1517,7 +1585,8 @@ class MemAgent:
             tools=overrides.get("tools", getattr(memagent, "tools", None)),
             persona=overrides.get("persona", getattr(memagent, "persona", None)),
             instruction=overrides.get("instruction", getattr(memagent, "instruction", None)),
-            memory_mode=overrides.get("memory_mode", getattr(memagent, "memory_mode", None)),
+            application_mode=overrides.get("application_mode", application_mode_to_use),
+            memory_types=overrides.get("memory_types", memory_types_to_use),
             max_steps=overrides.get("max_steps", getattr(memagent, "max_steps", None)),
             memory_ids=overrides.get("memory_ids", getattr(memagent, "memory_ids", [])),
             agent_id=agent_id,
@@ -2192,7 +2261,7 @@ class MemAgent:
         # Get a fresh copy of the memagent from the memory provider
         self.refresh()
 
-        return f"MemAgent(agent_id={self.agent_id}, memory_ids={self.memory_ids}, memory_mode={self.memory_mode}, max_steps={self.max_steps}, instruction={self.instruction}, model={self.model}, tools={self.tools}, persona={self.persona})"
+        return f"MemAgent(agent_id={self.agent_id}, memory_ids={self.memory_ids}, application_mode={self.application_mode.value}, active_memory_types={[mt.value for mt in self.active_memory_types]}, max_steps={self.max_steps}, instruction={self.instruction}, model={self.model}, tools={self.tools}, persona={self.persona})"
     
     def __repr__(self):
         """
@@ -2313,3 +2382,379 @@ class MemAgent:
         except Exception as e:
             logger.error(f"Error updating long-term memory {long_term_memory_id}: {e}")
             return False
+
+    def generate_summaries(self, days_back: int = 7, max_memories_per_summary: int = 50) -> List[str]:
+        """
+        Generate summaries by compressing memory components from a specified time period.
+        
+        This method collects memory components from the specified time period,
+        uses an LLM to compress them into emotionally and situationally relevant summaries,
+        and stores them in the summaries collection.
+        
+        Parameters:
+        -----------
+        days_back : int, optional
+            Number of days back to include in the summary (default: 7)
+        max_memories_per_summary : int, optional
+            Maximum number of memory components to include in each summary (default: 50)
+            
+        Returns:
+        --------
+        List[str]
+            List of summary IDs that were created
+        """
+        try:
+            import time
+            from .embeddings.openai import get_embedding
+            
+            # Calculate time range (days_back days ago to now)
+            current_time = time.time()
+            start_time = current_time - (days_back * 24 * 60 * 60)
+            
+            logger.info(f"Generating summaries for agent {self.agent_id} from {days_back} days back")
+            logger.debug(f"Time range: {start_time} to {current_time}")
+            logger.debug(f"Agent memory_ids: {self.memory_ids}")
+            logger.debug(f"Active memory types: {self.memory_component.active_memory_types}")
+            
+            # Collect memory components from all active memory types
+            all_memories = []
+            for memory_id in self.memory_ids:
+                logger.info(f"Searching memory_id: {memory_id}")
+                for memory_type in self.memory_component.active_memory_types:
+                    if memory_type in [MemoryType.CONVERSATION_MEMORY, MemoryType.WORKFLOW_MEMORY, 
+                                     MemoryType.SHORT_TERM_MEMORY, MemoryType.LONG_TERM_MEMORY]:
+                        try:
+                            logger.info(f"Searching {memory_type.value} collection for memory_id: {memory_id}")
+                            # Get memories within the time range
+                            memories = self._get_memories_in_time_range(memory_id, memory_type, start_time, current_time)
+                            logger.info(f"Found {len(memories)} memories in {memory_type.value}")
+                            all_memories.extend(memories)
+                        except Exception as e:
+                            logger.warning(f"Could not retrieve {memory_type.value} memories: {e}")
+            
+            if not all_memories:
+                logger.info(f"No memories found for agent {self.agent_id} in the specified time range")
+                return []
+            
+            # Sort memories by timestamp
+            all_memories.sort(key=lambda x: x.get('timestamp', 0))
+            
+            logger.info(f"Found {len(all_memories)} memory components to summarize")
+            
+            # Split memories into chunks and create summaries
+            summary_ids = []
+            for i in range(0, len(all_memories), max_memories_per_summary):
+                memory_chunk = all_memories[i:i + max_memories_per_summary]
+                
+                # Generate summary for this chunk
+                summary_content = self._compress_memories_with_llm(memory_chunk)
+                
+                if summary_content:
+                    # Create summary document
+                    summary_doc = {
+                        "memory_id": self.memory_ids[0] if self.memory_ids else "default",
+                        "agent_id": self.agent_id,
+                        "summary_content": summary_content,
+                        "period_start": memory_chunk[0].get('timestamp', start_time),
+                        "period_end": memory_chunk[-1].get('timestamp', current_time),
+                        "memory_components_count": len(memory_chunk),
+                        "created_at": current_time,
+                        "embedding": get_embedding(summary_content)
+                    }
+                    
+                    # Store summary
+                    summary_id = self.memory_provider.store(summary_doc, MemoryType.SUMMARIES)
+                    summary_ids.append(summary_id)
+                    
+                    logger.info(f"Created summary {summary_id} covering {len(memory_chunk)} memories")
+            
+            logger.info(f"Generated {len(summary_ids)} summaries for agent {self.agent_id}")
+            return summary_ids
+            
+        except Exception as e:
+            logger.error(f"Error generating summaries: {e}")
+            return []
+
+    def update_persona_from_summaries(self, max_summaries: int = 5, save: bool = True) -> bool:
+        """
+        Update the agent's persona based on recent summaries.
+        
+        This method retrieves recent summaries, uses an LLM to analyze them,
+        and updates the agent's persona goals and background accordingly.
+        
+        Parameters:
+        -----------
+        max_summaries : int, optional
+            Maximum number of recent summaries to consider (default: 5)
+        save : bool, optional
+            Whether to save the updated persona (default: True)
+            
+        Returns:
+        --------
+        bool
+            True if persona was successfully updated, False otherwise
+        """
+        try:
+            if not self.persona:
+                logger.info(f"Agent {self.agent_id} has no persona to update")
+                return False
+            
+            # Get recent summaries for this agent
+            recent_summaries = []
+            for memory_id in self.memory_ids:
+                summaries = self.memory_provider.get_summaries_by_memory_id(memory_id, max_summaries)
+                recent_summaries.extend(summaries)
+            
+            if not recent_summaries:
+                logger.info(f"No summaries found for agent {self.agent_id}")
+                return False
+            
+            # Sort by creation time and take the most recent
+            recent_summaries.sort(key=lambda x: x.get('created_at', 0), reverse=True)
+            recent_summaries = recent_summaries[:max_summaries]
+            
+            logger.info(f"Updating persona for agent {self.agent_id} using {len(recent_summaries)} summaries")
+            
+            # Use LLM to analyze summaries and update persona
+            updated_persona_data = self._update_persona_with_llm(recent_summaries)
+            
+            if updated_persona_data:
+                # Update persona attributes
+                if 'goals' in updated_persona_data:
+                    self.persona.goals = updated_persona_data['goals']
+                if 'background' in updated_persona_data:
+                    self.persona.background = updated_persona_data['background']
+                
+                # Regenerate embedding for updated persona
+                self.persona.embedding = self.persona._generate_embedding()
+                
+                if save:
+                    # Save updated persona
+                    self.persona.store_persona(self.memory_provider)
+                    logger.info(f"Successfully updated and saved persona for agent {self.agent_id}")
+                else:
+                    logger.info(f"Updated persona for agent {self.agent_id} (not saved)")
+                
+                return True
+            else:
+                logger.warning(f"LLM failed to generate persona updates for agent {self.agent_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error updating persona from summaries: {e}")
+            return False
+
+    def _get_memories_in_time_range(self, memory_id: str, memory_type: MemoryType, start_time: float, end_time: float) -> List[Dict]:
+        """
+        Retrieve memory components within a specific time range.
+        
+        Parameters:
+        -----------
+        memory_id : str
+            The memory ID to retrieve components for
+        memory_type : MemoryType
+            The type of memory to retrieve
+        start_time : float
+            Start timestamp (Unix epoch)
+        end_time : float
+            End timestamp (Unix epoch)
+            
+        Returns:
+        --------
+        List[Dict]
+            List of memory components within the time range
+        """
+        try:
+            from datetime import datetime
+            
+            # Convert float timestamps to ISO format strings for comparison
+            start_iso = datetime.fromtimestamp(start_time).isoformat()
+            end_iso = datetime.fromtimestamp(end_time).isoformat()
+            
+            # Build query for time range using ISO format strings
+            query = {
+                "memory_id": memory_id,
+                "timestamp": {
+                    "$gte": start_iso,
+                    "$lte": end_iso
+                }
+            }
+            
+            # Get collection based on memory type
+            collection = None
+            if memory_type == MemoryType.CONVERSATION_MEMORY:
+                collection = self.memory_provider.conversation_memory_collection
+            elif memory_type == MemoryType.WORKFLOW_MEMORY:
+                collection = self.memory_provider.workflow_memory_collection
+            elif memory_type == MemoryType.SHORT_TERM_MEMORY:
+                collection = self.memory_provider.short_term_memory_collection
+            elif memory_type == MemoryType.LONG_TERM_MEMORY:
+                collection = self.memory_provider.long_term_memory_collection
+            
+            if collection is not None:
+                # Debug logging
+                logger.debug(f"Searching {memory_type.value} collection for memory_id: {memory_id}")
+                logger.debug(f"Time range: {start_iso} to {end_iso}")
+                logger.debug(f"Query: {query}")
+                
+                # Check total documents in collection for this memory_id
+                total_docs = collection.count_documents({"memory_id": memory_id})
+                logger.debug(f"Total documents in {memory_type.value} for memory_id {memory_id}: {total_docs}")
+                
+                # Check if any documents exist without time filter
+                if total_docs > 0:
+                    # Get a sample document to check timestamp format
+                    sample_doc = collection.find_one({"memory_id": memory_id})
+                    if sample_doc:
+                        sample_timestamp = sample_doc.get('timestamp', 'No timestamp field')
+                        logger.debug(f"Sample timestamp: {sample_timestamp}, type: {type(sample_timestamp)}")
+                
+                # Execute the actual query
+                results = list(collection.find(query, {"embedding": 0}).sort("timestamp", 1))
+                logger.debug(f"Found {len(results)} memories in time range for {memory_type.value}")
+                
+                return results
+            else:
+                logger.warning(f"No collection found for memory type: {memory_type.value}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error retrieving memories in time range: {e}")
+            return []
+
+    def _compress_memories_with_llm(self, memories: List[Dict]) -> str:
+        """
+        Use LLM to compress memory components into an emotionally and situationally relevant summary.
+        
+        Parameters:
+        -----------
+        memories : List[Dict]
+            List of memory components to compress
+            
+        Returns:
+        --------
+        str
+            Compressed summary content
+        """
+        try:
+            # Extract content from memories
+            memory_contents = []
+            for memory in memories:
+                content = memory.get('content', '')
+                role = memory.get('role', '')
+                timestamp = memory.get('timestamp', '')
+                
+                if content:
+                    if role:
+                        memory_contents.append(f"[{role}]: {content}")
+                    else:
+                        memory_contents.append(content)
+            
+            if not memory_contents:
+                return ""
+            
+            # Create compression prompt
+            memories_text = "\n".join(memory_contents)
+            compression_prompt = f"""
+            Analyze the following memory components and create a concise summary that captures:
+            1. Emotionally significant moments and interactions
+            2. Situationally relevant context and patterns
+            3. Key achievements, challenges, or learning experiences
+            4. Important relationship dynamics or behavioral patterns
+            
+            Focus on information that would be valuable for understanding personality development,
+            preferences, and behavioral patterns over time.
+            
+            Memory components:
+            {memories_text}
+            
+            Provide a well-structured summary that captures the essence of these experiences:
+            """
+            
+            # Use the agent's LLM to generate summary
+            summary = self.model.generate_text(
+                compression_prompt, 
+                instructions="Create a concise but comprehensive summary focusing on emotionally and situationally relevant aspects. Keep it under 300 words."
+            )
+            
+            return summary.strip()
+            
+        except Exception as e:
+            logger.error(f"Error compressing memories with LLM: {e}")
+            return ""
+
+    def _update_persona_with_llm(self, summaries: List[Dict]) -> Dict[str, str]:
+        """
+        Use LLM to update persona based on summaries.
+        
+        Parameters:
+        -----------
+        summaries : List[Dict]
+            List of summary documents
+            
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary containing updated 'goals' and 'background' fields
+        """
+        try:
+            # Extract summary contents
+            summary_contents = [s.get('summary_content', '') for s in summaries if s.get('summary_content')]
+            
+            if not summary_contents:
+                return {}
+            
+            summaries_text = "\n\n".join(summary_contents)
+            
+            # Current persona information
+            current_goals = self.persona.goals
+            current_background = self.persona.background
+            
+            # Create persona update prompt
+            update_prompt = f"""
+            Based on the following recent summaries of experiences and interactions, 
+            analyze how the persona should evolve and update the goals and background accordingly.
+            
+            Current Persona:
+            Goals: {current_goals}
+            Background: {current_background}
+            
+            Recent Experience Summaries:
+            {summaries_text}
+            
+            Please provide updated persona information that reflects growth, learning, and adaptation based on these experiences.
+            Consider:
+            - New skills or knowledge gained
+            - Evolved priorities or interests
+            - Adjusted behavioral patterns
+            - Refined understanding of capabilities
+            
+            Respond with ONLY a JSON object in this exact format:
+            {{
+                "goals": "updated goals here",
+                "background": "updated background here"
+            }}
+            """
+            
+            # Use the agent's LLM to generate updates
+            response = self.model.generate_text(
+                update_prompt, 
+                instructions="Return only a valid JSON object with 'goals' and 'background' fields. No other text."
+            )
+            
+            # Parse JSON response
+            import json
+            try:
+                persona_updates = json.loads(response.strip())
+                if isinstance(persona_updates, dict) and 'goals' in persona_updates and 'background' in persona_updates:
+                    return persona_updates
+                else:
+                    logger.warning("LLM response was not in expected format")
+                    return {}
+            except json.JSONDecodeError:
+                logger.warning("LLM response was not valid JSON")
+                return {}
+            
+        except Exception as e:
+            logger.error(f"Error updating persona with LLM: {e}")
+            return {}
