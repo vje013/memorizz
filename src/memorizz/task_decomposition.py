@@ -60,7 +60,7 @@ class TaskDecomposer:
                 "instruction": agent.instruction,
                 "persona": agent.persona.generate_system_prompt_input() if agent.persona else None,
                 "tools": [],
-                "memory_mode": agent.memory_mode
+                "application_mode": agent.application_mode.value
             }
             
             # Extract tool capabilities

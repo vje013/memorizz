@@ -1,7 +1,7 @@
 from .conversational_memory_component import ConversationMemoryComponent
 from ..memory_provider import MemoryProvider
 from ..memory_provider.memory_type import MemoryType
-from .memory_mode import MemoryMode
+from .application_mode import ApplicationMode, ApplicationModeConfig
 from ..embeddings.openai import get_embedding
 from typing import TYPE_CHECKING, Dict, Any, List, Optional
 import time
@@ -14,28 +14,41 @@ def get_openai_llm():
     return OpenAI()
 
 class MemoryComponent:
-    def __init__(self, memory_mode: str, memory_provider: MemoryProvider = None):
-        self.memory_mode = memory_mode
+    def __init__(self, application_mode: str, memory_provider: MemoryProvider = None):
+        # Validate and set the application mode
+        if isinstance(application_mode, str):
+            self.application_mode = ApplicationModeConfig.validate_mode(application_mode)
+        else:
+            self.application_mode = application_mode
+            
         self.memory_provider = memory_provider
         self.query_embedding = None
+        
+        # Get the memory types for this application mode
+        self.active_memory_types = ApplicationModeConfig.get_memory_types(self.application_mode)
 
     def generate_memory_component(self, content: dict):
         """
-        Generate the memory component based on the memory mode.
+        Generate the memory component based on the application mode.
+        The memory component type is determined by the content and active memory types.
         """
 
         # Generate the embedding of the memory component
         content["embedding"] = get_embedding(content["content"])
 
-        # Generate the memory component based on the memory mode
-        if self.memory_mode == MemoryMode.Conversational or self.memory_mode == MemoryMode.General:
+        # Determine the appropriate memory component type based on content and active memory types
+        if MemoryType.CONVERSATION_MEMORY in self.active_memory_types and "role" in content:
             return self._generate_conversational_memory_component(content)
-        elif self.memory_mode == MemoryMode.Task:
-            return self._generate_task_memory_component()
-        elif self.memory_mode == MemoryMode.Workflow:
-            return self._generate_workflow_memory_component()
+        elif MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
+            return self._generate_workflow_memory_component(content)
+        elif MemoryType.LONG_TERM_MEMORY in self.active_memory_types:
+            return self._generate_knowledge_base_component(content)
         else:
-            raise ValueError(f"Invalid memory mode: {self.memory_mode}")
+            # Default to conversational if available, otherwise use the first active memory type
+            if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
+                return self._generate_conversational_memory_component(content)
+            else:
+                raise ValueError(f"No suitable memory component type for application mode: {self.application_mode.value}")
 
     def _generate_conversational_memory_component(self, content: dict) -> ConversationMemoryComponent:
         """
@@ -57,23 +70,71 @@ class MemoryComponent:
         )
 
         # Save the memory component to the memory provider
-        self._save_memory_component(memory_component)
+        self._save_memory_component(memory_component, MemoryType.CONVERSATION_MEMORY)
 
         return memory_component
 
-    def _generate_task_memory_component(self):
-        pass
+    def _generate_workflow_memory_component(self, content: dict):
+        """
+        Generate a workflow memory component.
+        
+        Parameters:
+            content (dict): The content of the memory component.
+            
+        Returns:
+            dict: The workflow memory component.
+        """
+        workflow_component = {
+            "content": content["content"],
+            "timestamp": content.get("timestamp", time.time()),
+            "memory_id": content["memory_id"],
+            "embedding": content["embedding"],
+            "component_type": "workflow",
+            "workflow_step": content.get("workflow_step", "unknown"),
+            "task_id": content.get("task_id"),
+        }
+        
+        # Save the memory component to the memory provider
+        self._save_memory_component(workflow_component, MemoryType.WORKFLOW_MEMORY)
+        
+        return workflow_component
 
-    def _generate_workflow_memory_component(self):
-        pass
+    def _generate_knowledge_base_component(self, content: dict):
+        """
+        Generate a knowledge base (long-term memory) component.
+        
+        Parameters:
+            content (dict): The content of the memory component.
+            
+        Returns:
+            dict: The knowledge base memory component.
+        """
+        knowledge_component = {
+            "content": content["content"],
+            "timestamp": content.get("timestamp", time.time()),
+            "memory_id": content["memory_id"],
+            "embedding": content["embedding"],
+            "component_type": "knowledge",
+            "category": content.get("category", "general"),
+            "importance": content.get("importance", 0.5),
+        }
+        
+        # Save the memory component to the memory provider
+        self._save_memory_component(knowledge_component, MemoryType.LONG_TERM_MEMORY)
+        
+        return knowledge_component
     
-    def _save_memory_component(self, memory_component: any):
+    def _save_memory_component(self, memory_component: any, memory_type: MemoryType = None):
         """
         Save the memory component to the memory provider.
+        
+        Parameters:
+            memory_component: The memory component to save
+            memory_type: Specific memory type to save to (optional)
         """
 
         # Remove the score(vector similarity score calculated by the vector search of the memory provider) from the memory component if it exists
-        if "score" in memory_component:
+        if isinstance(memory_component, dict) and "score" in memory_component:
             memory_component.pop("score", None)
 
         # Convert Pydantic model to dictionary if needed
@@ -85,14 +146,23 @@ class MemoryComponent:
             # If it's already a dictionary, use it as is
             memory_component_dict = memory_component
 
-        if self.memory_mode == MemoryMode.Conversational or self.memory_mode == MemoryMode.General:
-            self.memory_provider.store(memory_component_dict, MemoryType.CONVERSATION_MEMORY)
-        elif self.memory_mode == MemoryMode.Task:
-            self.memory_provider.store(memory_component_dict, MemoryType.TASK_MEMORY)
-        elif self.memory_mode == MemoryMode.Workflow:
-            self.memory_provider.store(memory_component_dict, MemoryType.WORKFLOW_MEMORY)
-        else:
-            raise ValueError(f"Invalid memory mode: {self.memory_mode}")
+        # If memory_type is not specified, determine from the component or use conversation as default
+        if memory_type is None:
+            if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
+                memory_type = MemoryType.CONVERSATION_MEMORY
+            else:
+                # Use the first available memory type from active types
+                memory_type = self.active_memory_types[0] if self.active_memory_types else MemoryType.CONVERSATION_MEMORY
+
+        # Validate that the memory type is active for this application mode
+        if memory_type not in self.active_memory_types:
+            print(f"Warning: Memory type {memory_type.value} not active for application mode {self.application_mode.value}")
+
+        print(f"Storing memory component of type {memory_type.value} in memory provider")
+        print(f"Memory component data: {memory_component_dict}")
+        stored_id = self.memory_provider.store(memory_component_dict, memory_type)
+        print(f"Stored memory component with ID: {stored_id}")
+        return stored_id
 
     def retrieve_memory_components_by_memory_id(self, memory_id: str, memory_type: MemoryType):
         """

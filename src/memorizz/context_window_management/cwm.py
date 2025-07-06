@@ -18,24 +18,36 @@ class CWM:
 
     @staticmethod
     def _generate_prompt_for_memory_type(memory_type: MemoryType):
-        prompt = ""
+        # Define memory type prompts in a dictionary for better maintainability
+        memory_prompts = {
+            MemoryType.CONVERSATION_MEMORY: {
+                "description": "This is a memory type that stores the conversation history between the agent and the user.",
+                "usage": "Use this to provide continuity, avoid repeating yourself, and reference prior turns."
+            },
+            MemoryType.WORKFLOW_MEMORY: {
+                "description": "This is a memory type that stores the workflow history between the agent and the user.",
+                "usage": "Use this to provide continuity, avoid repeating yourself, and reference prior turns."
+            },
+            MemoryType.SHARED_MEMORY: {
+                "description": "This is a memory type that stores shared blackboard information for multi-agent coordination.",
+                "usage": "Use this to coordinate with other agents, understand your role in the agent hierarchy, and access shared coordination activities and context."
+            },
+            MemoryType.SUMMARIES: {
+                "description": "This is a memory type that stores compressed summaries of past conversations and interactions to preserve important context while managing memory efficiently.",
+                "usage": "Use these summaries to understand the broader context of your interactions with the user, recall important topics, preferences, and past decisions. This helps you provide more personalized and context-aware responses even when specific conversations are no longer in active memory."
+            }
+        }
         
-        if memory_type.value == MemoryType.CONVERSATION_MEMORY.value:
-            # Construct a prompt that informs the agent on what the memory type means and how to use it
-            prompt += f"\n\nMemory Type: {MemoryType.CONVERSATION_MEMORY.value}\n"
-            prompt += f"Memory Type Description: This is a memory type that stores the conversation history between the agent and the user.\n"
-            prompt += f"Memory Type Usage: Use this to provide continuity, avoid repeating yourself, and reference prior turns.\n"
-        elif memory_type.value == MemoryType.WORKFLOW_MEMORY.value:
-            # Construct a prompt that informs the agent on what the memory type means and how to use it
-            prompt += f"\n\nMemory Type: {MemoryType.WORKFLOW_MEMORY.value}\n"
-            prompt += f"Memory Type Description: This is a memory type that stores the workflow history between the agent and the user.\n"
-            prompt += f"Memory Type Usage: Use this to provide continuity, avoid repeating yourself, and reference prior turns.\n"
-        elif memory_type.value == MemoryType.SHARED_MEMORY.value:
-            # Construct a prompt that informs the agent on what the memory type means and how to use it
-            prompt += f"\n\nMemory Type: {MemoryType.SHARED_MEMORY.value}\n"
-            prompt += f"Memory Type Description: This is a memory type that stores shared blackboard information for multi-agent coordination.\n"
-            prompt += f"Memory Type Usage: Use this to coordinate with other agents, understand your role in the agent hierarchy, and access shared coordination activities and context.\n"
+        # Get the prompt configuration for this memory type
+        prompt_config = memory_prompts.get(memory_type)
         
-        return prompt
+        if prompt_config:
+            prompt = f"\n\nMemory Type: {memory_type.value}\n"
+            prompt += f"Memory Type Description: {prompt_config['description']}\n"
+            prompt += f"Memory Type Usage: {prompt_config['usage']}\n"
+            return prompt
+        else:
+            # Handle unknown memory types gracefully
+            return f"\n\nMemory Type: {memory_type.value}\n"
 
 # Can take in an array of memory stores and then return a prompt that informs the agent on how to manage the context window
