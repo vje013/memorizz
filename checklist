@@ -1,0 +1,772 @@
+# 🎯 Detailed Step-by-Step Checklist: Multi-LLM Provider Support for Memorizz
+
+Based on Mem0's development standards and unified configuration approach, here's your complete contribution checklist:
+
+## 📋 Pre-Development Setup
+
+### 1. Repository Setup
+- [ ] Fork the memorizz repository: `https://github.com/RichmondAlake/memorizz`
+- [ ] Clone your fork locally:
+  ```bash
+  git clone https://github.com/vje013/memorizz.git
+  cd memorizz
+  ```
+- [ ] Add upstream remote:
+  ```bash
+  git remote add upstream https://github.com/RichmondAlake/memorizz.git
+  ```
+- [ ] Create feature branch:
+  ```bash
+  git checkout -b feature/unified-multi-llm-support
+  ```
+
+### 2. Development Environment Setup
+- [ ] Install development dependencies:
+  ```bash
+  pip install -e .
+  pip install anthropic google-generativeai pytest black flake8 pre-commit
+  ```
+- [ ] Set up pre-commit hooks (if available):
+  ```bash
+  pre-commit install
+  ```
+
+### 3. Research & Analysis
+- [ ] Study existing OpenAI implementation in `src/memorizz/llms/openai.py`
+- [ ] Analyze tool calling patterns in `src/memorizz/memagent.py`
+- [ ] Review embedding usage in `src/memorizz/embeddings/openai.py`
+- [ ] Understand configuration patterns in helper functions
+
+## 🏗️ Implementation Phase
+
+### 4. Create Base Infrastructure
+
+#### 4.1 Create Base LLM Abstract Class
+- [ ] Create `src/memorizz/llms/base.py`:
+```python
+from abc import ABC, abstractmethod
+from typing import Callable, List, Optional, Dict, Any
+
+class BaseLLM(ABC):
+    """Base class for all LLM provider implementations."""
+    
+    def __init__(self, config: Dict[str, Any] = None):
+        """Initialize LLM with configuration."""
+        self.config = config or {}
+    
+    @abstractmethod
+    def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
+        """Generate tool metadata from function."""
+        pass
+    
+    @abstractmethod
+    def augment_docstring(self, docstring: str) -> str:
+        """Enhance docstring with LLM-generated content."""
+        pass
+    
+    @abstractmethod
+    def generate_queries(self, docstring: str) -> List[str]:
+        """Generate search queries for tool discovery."""
+        pass
+    
+    @abstractmethod
+    def generate_text(self, prompt: str, instructions: str = None) -> str:
+        """Generate text response."""
+        pass
+    
+    def _get_config_value(self, key: str, env_var: str = None, default: Any = None) -> Any:
+        """Get configuration value with precedence: config > env > default."""
+        import os
+        return self.config.get(key) or (os.getenv(env_var) if env_var else None) or default
+```
+
+#### 4.2 Create Provider Registry
+- [ ] Create `src/memorizz/llms/registry.py`:
+```python
+from typing import Dict, Type, Any
+from .base import BaseLLM
+
+class LLMRegistry:
+    """Registry for LLM providers following Mem0 pattern."""
+    _providers: Dict[str, Type[BaseLLM]] = {}
+    
+    @classmethod
+    def register(cls, name: str, provider_class: Type[BaseLLM]):
+        """Register a new LLM provider."""
+        cls._providers[name] = provider_class
+    
+    @classmethod
+    def get_provider(cls, name: str) -> Type[BaseLLM]:
+        """Get provider class by name."""
+        if name not in cls._providers:
+            available = ', '.join(cls._providers.keys())
+            raise ValueError(f"Unknown provider: {name}. Available: {available}")
+        return cls._providers[name]
+    
+    @classmethod
+    def list_providers(cls) -> List[str]:
+        """List all registered providers."""
+        return list(cls._providers.keys())
+
+def register_provider(name: str):
+    """Decorator to register LLM providers."""
+    def decorator(cls):
+        LLMRegistry.register(name, cls)
+        return cls
+    return decorator
+```
+
+#### 4.3 Create Factory Function
+- [ ] Create `src/memorizz/llms/factory.py`:
+```python
+from typing import Dict, Any
+from .base import BaseLLM
+from .registry import LLMRegistry
+
+def create_llm(provider: str, config: Dict[str, Any] = None) -> BaseLLM:
+    """
+    Factory function to create LLM instances following Mem0 pattern.
+    
+    Args:
+        provider: Provider name (e.g., "openai", "anthropic", "gemini")
+        config: Provider-specific configuration
+        
+    Returns:
+        BaseLLM instance
+    """
+    provider_class = LLMRegistry.get_provider(provider)
+    return provider_class(config)
+```
+
+### 5. Update OpenAI Provider
+
+#### 5.1 Refactor OpenAI Implementation
+- [ ] Update `src/memorizz/llms/openai.py`:
+```python
+import os
+import json
+import openai
+import logging
+from typing import Callable, List, Optional, Dict, Any
+from .base import BaseLLM
+from .registry import register_provider
+import inspect
+
+@register_provider("openai")
+class OpenAI(BaseLLM):
+    """OpenAI LLM provider with unified configuration."""
+    
+    def __init__(self, config: Dict[str, Any] = None):
+        super().__init__(config)
+        
+        # Apply precedence: config > env > defaults
+        self.api_key = self._get_config_value("api_key", "OPENAI_API_KEY")
+        self.model = self._get_config_value("model", default="gpt-4o")
+        self.temperature = self._get_config_value("temperature", default=0.7)
+        self.max_tokens = self._get_config_value("max_tokens", default=1000)
+        
+        if not self.api_key:
+            raise ValueError("OpenAI API key is required")
+        
+        self.client = openai.OpenAI(api_key=self.api_key)
+    
+    # Keep existing methods but update to use new config pattern
+    def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
+        # ... existing implementation
+        pass
+    
+    def augment_docstring(self, docstring: str) -> str:
+        # ... existing implementation
+        pass
+    
+    def generate_queries(self, docstring: str) -> List[str]:
+        # ... existing implementation
+        pass
+    
+    def generate_text(self, prompt: str, instructions: str = None) -> str:
+        # ... existing implementation
+        pass
+```
+
+### 6. Implement Anthropic Provider
+
+#### 6.1 Create Anthropic Implementation
+- [ ] Create `src/memorizz/llms/anthropic.py`:
+```python
+import os
+import json
+import logging
+from typing import Callable, List, Optional, Dict, Any
+from anthropic import Anthropic
+from .base import BaseLLM
+from .registry import register_provider
+import inspect
+
+@register_provider("anthropic")
+class AnthropicLLM(BaseLLM):
+    """Anthropic Claude LLM provider."""
+    
+    def __init__(self, config: Dict[str, Any] = None):
+        super().__init__(config)
+        
+        self.api_key = self._get_config_value("api_key", "ANTHROPIC_API_KEY")
+        self.model = self._get_config_value("model", default="claude-3-sonnet-20240229")
+        self.temperature = self._get_config_value("temperature", default=0.7)
+        self.max_tokens = self._get_config_value("max_tokens", default=1000)
+        
+        if not self.api_key:
+            raise ValueError("Anthropic API key is required")
+        
+        self.client = Anthropic(api_key=self.api_key)
+    
+    def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
+        """Generate tool metadata using Claude."""
+        # Implementation similar to OpenAI but using Anthropic API
+        pass
+    
+    def augment_docstring(self, docstring: str) -> str:
+        """Augment docstring using Claude."""
+        # Implementation using Claude's messages API
+        pass
+    
+    def generate_queries(self, docstring: str) -> List[str]:
+        """Generate queries using Claude."""
+        # Implementation using Claude's messages API
+        pass
+    
+    def generate_text(self, prompt: str, instructions: str = None) -> str:
+        """Generate text using Claude."""
+        # Implementation using Claude's messages API
+        pass
+```
+
+### 7. Implement Gemini Provider
+
+#### 7.1 Create Gemini Implementation
+- [ ] Create `src/memorizz/llms/gemini.py`:
+```python
+import os
+import json
+import logging
+from typing import Callable, List, Optional, Dict, Any
+import google.generativeai as genai
+from .base import BaseLLM
+from .registry import register_provider
+import inspect
+
+@register_provider("gemini")
+class GeminiLLM(BaseLLM):
+    """Google Gemini LLM provider."""
+    
+    def __init__(self, config: Dict[str, Any] = None):
+        super().__init__(config)
+        
+        self.api_key = self._get_config_value("api_key", "GOOGLE_API_KEY")
+        self.model_name = self._get_config_value("model", default="gemini-pro")
+        self.temperature = self._get_config_value("temperature", default=0.7)
+        self.max_tokens = self._get_config_value("max_tokens", default=1000)
+        
+        if not self.api_key:
+            raise ValueError("Google API key is required")
+        
+        genai.configure(api_key=self.api_key)
+        self.model = genai.GenerativeModel(self.model_name)
+    
+    def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
+        """Generate tool metadata using Gemini."""
+        # Implementation using Gemini API
+        pass
+    
+    def augment_docstring(self, docstring: str) -> str:
+        """Augment docstring using Gemini."""
+        # Implementation using Gemini API
+        pass
+    
+    def generate_queries(self, docstring: str) -> List[str]:
+        """Generate queries using Gemini."""
+        # Implementation using Gemini API
+        pass
+    
+    def generate_text(self, prompt: str, instructions: str = None) -> str:
+        """Generate text using Gemini."""
+        # Implementation using Gemini API
+        pass
+```
+
+### 8. Update Core Components
+
+#### 8.1 Update LLM Module Exports
+- [ ] Update `src/memorizz/llms/__init__.py`:
+```python
+from .openai import OpenAI
+from .anthropic import AnthropicLLM
+from .gemini import GeminiLLM
+from .base import BaseLLM
+from .factory import create_llm
+from .registry import LLMRegistry, register_provider
+
+__all__ = [
+    'OpenAI', 'AnthropicLLM', 'GeminiLLM', 'BaseLLM', 
+    'create_llm', 'LLMRegistry', 'register_provider'
+]
+```
+
+#### 8.2 Update MemAgent
+- [ ] Update `src/memorizz/memagent.py` constructor:
+```python
+from typing import Union, Dict, Any
+from .llms.base import BaseLLM
+from .llms.factory import create_llm
+from .llms.openai import OpenAI  # For backward compatibility
+
+class MemAgent:
+    def __init__(
+        self,
+        llm_config: Dict[str, Any] = None,
+        model: Optional[Union[BaseLLM, OpenAI]] = None,  # Backward compatibility
+        # ... other existing parameters
+    ):
+        # New unified approach (Mem0 style)
+        if llm_config:
+            provider = llm_config.get("provider", "openai")
+            config = llm_config.get("config", {})
+            self.model = create_llm(provider, config)
+        
+        # Backward compatibility for existing code
+        elif model:
+            self.model = model
+        
+        # Default fallback
+        else:
+            self.model = create_llm("openai")
+        
+        # ... rest of existing initialization
+```
+
+#### 8.3 Update Helper Functions
+- [ ] Update `src/memorizz/memory_component/memory_component.py`:
+```python
+def get_default_llm():
+    """Get default LLM with environment-based provider selection."""
+    import os
+    from ..llms.factory import create_llm
+    
+    provider = os.getenv("MEMORIZZ_LLM_PROVIDER", "openai")
+    return create_llm(provider)
+
+# Keep backward compatibility
+def get_openai_llm():
+    from ..llms.openai import OpenAI
+    return OpenAI()
+```
+
+- [ ] Update `src/memorizz/toolbox/toolbox.py`:
+```python
+def get_default_llm():
+    """Get default LLM for toolbox operations."""
+    import os
+    from ..llms.factory import create_llm
+    
+    provider = os.getenv("MEMORIZZ_LLM_PROVIDER", "openai")
+    return create_llm(provider)
+
+# Keep backward compatibility
+def get_openai():
+    from ..llms.openai import OpenAI
+    return OpenAI()
+```
+
+## 🧪 Testing Phase
+
+### 9. Create Comprehensive Tests
+
+#### 9.1 Unit Tests for Providers
+- [ ] Create `tests/test_llm_providers.py`:
+```python
+import pytest
+from src.memorizz.llms.factory import create_llm
+from src.memorizz.llms.registry import LLMRegistry
+from src.memorizz.llms.openai import OpenAI
+from src.memorizz.llms.anthropic import AnthropicLLM
+from src.memorizz.llms.gemini import GeminiLLM
+
+class TestLLMProviders:
+    def test_openai_provider(self):
+        # Test OpenAI provider creation and basic functionality
+        pass
+    
+    def test_anthropic_provider(self):
+        # Test Anthropic provider creation and basic functionality
+        pass
+    
+    def test_gemini_provider(self):
+        # Test Gemini provider creation and basic functionality
+        pass
+    
+    def test_factory_function(self):
+        # Test factory function with different providers
+        pass
+    
+    def test_registry_system(self):
+        # Test provider registration and retrieval
+        pass
+```
+
+#### 9.2 Integration Tests
+- [ ] Create `tests/test_memagent_integration.py`:
+```python
+import pytest
+from src.memorizz.memagent import MemAgent
+from src.memorizz.memory_provider.mongodb.provider import MongoDBProvider
+
+class TestMemAgentIntegration:
+    def test_memagent_with_openai(self):
+        # Test MemAgent with OpenAI using new config
+        pass
+    
+    def test_memagent_with_anthropic(self):
+        # Test MemAgent with Anthropic using new config
+        pass
+    
+    def test_memagent_with_gemini(self):
+        # Test MemAgent with Gemini using new config
+        pass
+    
+    def test_backward_compatibility(self):
+        # Test that existing OpenAI code still works
+        pass
+```
+
+#### 9.3 Configuration Tests
+- [ ] Create `tests/test_configuration.py`:
+```python
+import pytest
+import os
+from src.memorizz.llms.factory import create_llm
+
+class TestConfiguration:
+    def test_environment_variable_precedence(self):
+        # Test config > env > default precedence
+        pass
+    
+    def test_missing_api_keys(self):
+        # Test error handling for missing API keys
+        pass
+    
+    def test_invalid_provider(self):
+        # Test error handling for invalid provider names
+        pass
+```
+
+### 10. Run Tests and Code Quality Checks
+
+#### 10.1 Run All Tests
+- [ ] Execute test suite:
+```bash
+pytest tests/ -v
+```
+
+#### 10.2 Code Quality Checks
+- [ ] Run linting (if available):
+```bash
+flake8 src/memorizz/llms/
+```
+
+- [ ] Run formatting (if available):
+```bash
+black src/memorizz/llms/
+```
+
+- [ ] Check for any import issues:
+```bash
+python -c "from src.memorizz.llms import create_llm; print('Import successful')"
+```
+
+## 📖 Documentation Phase
+
+### 11. Create Documentation
+
+#### 11.1 Update README.md
+- [ ] Add multi-provider support section:
+```markdown
+## Multi-LLM Provider Support
+
+Memorizz now supports multiple LLM providers including OpenAI, Anthropic (Claude), and Google (Gemini).
+
+### Configuration
+
+```python
+# OpenAI (default)
+config = {
+    "provider": "openai",
+    "config": {
+        "model": "gpt-4o",
+        "temperature": 0.7,
+        "max_tokens": 1000
+    }
+}
+
+# Anthropic Claude
+config = {
+    "provider": "anthropic", 
+    "config": {
+        "model": "claude-3-sonnet-20240229",
+        "temperature": 0.1,
+        "max_tokens": 2000
+    }
+}
+
+# Google Gemini
+config = {
+    "provider": "gemini",
+    "config": {
+        "model": "gemini-pro",
+        "temperature": 0.5,
+        "max_tokens": 1500
+    }
+}
+
+# Usage
+agent = MemAgent(
+    llm_config=config,
+    instruction="You are a helpful assistant",
+    memory_provider=memory_provider
+)
+```
+
+### Environment Variables
+
+```bash
+# Default provider (optional)
+export MEMORIZZ_LLM_PROVIDER=openai  # or anthropic, gemini
+
+# API Keys (based on chosen provider)
+export OPENAI_API_KEY=your_openai_key
+export ANTHROPIC_API_KEY=your_claude_key
+export GOOGLE_API_KEY=your_gemini_key
+```
+```
+
+#### 11.2 Create Example Notebooks
+- [ ] Create `examples/multi_provider_demo.ipynb`:
+```python
+# Example notebook showing all three providers
+```
+
+- [ ] Update existing examples to show provider options
+
+#### 11.3 Create Provider-Specific Documentation
+- [ ] Create `docs/providers/openai.md`
+- [ ] Create `docs/providers/anthropic.md`  
+- [ ] Create `docs/providers/gemini.md`
+
+### 12. Update Dependencies
+
+#### 12.1 Update pyproject.toml
+- [ ] Add optional dependencies:
+```toml
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.7.0"]
+gemini = ["google-generativeai>=0.3.0"]
+all = ["anthropic>=0.7.0", "google-generativeai>=0.3.0"]
+```
+
+#### 12.2 Update Requirements
+- [ ] Ensure base requirements still work
+- [ ] Test optional dependency installation
+
+## 🚀 Pre-Submission Phase
+
+### 13. Final Testing and Validation
+
+#### 13.1 Comprehensive Testing
+- [ ] Test all providers work independently
+- [ ] Test factory function with all providers
+- [ ] Test MemAgent with all providers
+- [ ] Test backward compatibility thoroughly
+- [ ] Test environment variable precedence
+- [ ] Test error handling for missing keys
+- [ ] Test with real API calls (if possible)
+
+#### 13.2 Code Quality Final Check
+- [ ] Run all linting checks
+- [ ] Ensure all tests pass
+- [ ] Check code coverage
+- [ ] Verify no breaking changes
+
+#### 13.3 Documentation Review
+- [ ] Verify all examples work
+- [ ] Check README is updated
+- [ ] Ensure API documentation is complete
+
+### 14. Git Management
+
+#### 14.1 Commit Strategy
+- [ ] Make atomic commits with clear messages:
+```bash
+git commit -m "feat: add base LLM abstract class and registry system"
+git commit -m "feat: implement Anthropic provider with unified config"
+git commit -m "feat: implement Gemini provider with unified config"
+git commit -m "refactor: update OpenAI provider to use unified config"
+git commit -m "feat: update MemAgent to support multi-provider config"
+git commit -m "test: add comprehensive tests for all providers"
+git commit -m "docs: update documentation for multi-provider support"
+```
+
+#### 14.2 Branch Management
+- [ ] Rebase on latest main:
+```bash
+git fetch upstream
+git rebase upstream/main
+```
+
+- [ ] Push to your fork:
+```bash
+git push origin feature/unified-multi-llm-support
+```
+
+## 📝 Pull Request Phase
+
+### 15. Create Pull Request
+
+#### 15.1 PR Content
+- [ ] **Title**: "Add unified multi-LLM provider support (OpenAI, Anthropic, Gemini)"
+
+- [ ] **Description**:
+```markdown
+## 🎯 What This PR Does
+Adds support for Anthropic Claude and Google Gemini as alternative LLM providers to memorizz, implementing a unified configuration system inspired by Mem0's approach.
+
+## 🔧 Changes Made
+- [x] Created abstract base class for LLM providers
+- [x] Implemented provider registry system for extensibility
+- [x] Added Anthropic Claude provider with full API support
+- [x] Added Google Gemini provider with full API support
+- [x] Updated OpenAI provider to use unified configuration
+- [x] Updated MemAgent to support multi-provider configuration
+- [x] Maintained 100% backward compatibility
+- [x] Added comprehensive tests for all providers
+- [x] Updated documentation and examples
+- [x] Added configuration precedence (config > env > defaults)
+
+## 🧪 Testing
+- [x] Unit tests for all providers
+- [x] Integration tests with MemAgent
+- [x] Configuration and precedence tests
+- [x] Backward compatibility tests
+- [x] Error handling tests
+- [x] All existing tests still pass
+
+## 📖 Documentation
+- [x] README updated with multi-provider examples
+- [x] New example notebook created
+- [x] Provider-specific documentation added
+- [x] API documentation updated
+
+## 🔄 Backward Compatibility
+✅ All existing OpenAI-based code continues to work without changes
+✅ No breaking changes to public API
+✅ Environment variables are additive
+✅ Existing examples still work
+
+## 🎯 Usage Examples
+
+### New Unified Configuration (Recommended)
+```python
+# Anthropic Claude
+config = {
+    "provider": "anthropic",
+    "config": {
+        "model": "claude-3-sonnet-20240229",
+        "temperature": 0.1,
+        "max_tokens": 2000
+    }
+}
+
+agent = MemAgent(
+    llm_config=config,
+    instruction="You are a helpful assistant",
+    memory_provider=memory_provider
+)
+```
+
+### Backward Compatible (Still Works)
+```python
+from memorizz.llms.openai import OpenAI
+
+agent = MemAgent(
+    model=OpenAI(model="gpt-4o"),
+    instruction="You are a helpful assistant", 
+    memory_provider=memory_provider
+)
+```
+
+## 🌟 Benefits
+- **Provider Choice**: Users can choose based on cost, performance, regional availability
+- **Unified API**: Consistent configuration across all providers
+- **Easy Migration**: Simple provider switching via configuration
+- **Extensible**: Easy to add new providers via registry system
+- **Educational**: Demonstrates provider abstraction patterns
+
+## 📦 Dependencies
+- Added optional dependencies for `anthropic` and `google-generativeai`
+- No new required dependencies
+- Maintained existing dependency compatibility
+
+Closes #XXX (if there's a related issue)
+```
+
+#### 15.2 PR Checklist
+- [ ] PR title follows conventional commit format
+- [ ] Description is comprehensive and clear
+- [ ] All tests pass in CI
+- [ ] Code follows project style guidelines
+- [ ] Documentation is updated
+- [ ] Breaking changes are documented (none in this case)
+- [ ] Related issues are linked
+
+### 16. Post-Submission
+
+#### 16.1 Monitor and Respond
+- [ ] Monitor PR for feedback
+- [ ] Respond to review comments promptly
+- [ ] Make requested changes if needed
+- [ ] Keep PR updated with main branch
+
+#### 16.2 Community Engagement
+- [ ] Engage with maintainers respectfully
+- [ ] Provide clarification when requested
+- [ ] Be open to alternative approaches
+- [ ] Help with testing if needed
+
+## 📊 Success Metrics
+
+### 17. Contribution Success Indicators
+- [ ] PR is accepted and merged
+- [ ] Feature is included in next release
+- [ ] No regression issues reported
+- [ ] Community adoption of new providers
+- [ ] Positive feedback from users
+- [ ] Recognition as a significant contribution
+
+### 18. Follow-up Actions
+- [ ] Monitor for any post-merge issues
+- [ ] Help with documentation improvements
+- [ ] Assist with future provider additions
+- [ ] Share experience with community
+- [ ] Consider additional contributions
+
+---
+
+## 🎉 Completion
+
+Congratulations! You've successfully contributed a major feature to the memorizz project. This unified multi-LLM provider support will democratize access to the framework and serve as a foundation for future provider additions.
+
+**Key Achievements:**
+- ✅ Added support for 3 major LLM providers
+- ✅ Implemented clean, extensible architecture
+- ✅ Maintained 100% backward compatibility
+- ✅ Added comprehensive testing and documentation
+- ✅ Followed open source best practices
+
+This contribution demonstrates advanced software engineering skills and will have lasting impact on the project and its users.
